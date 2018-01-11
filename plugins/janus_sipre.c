@@ -456,6 +456,7 @@ typedef struct janus_sipre_stack {
 typedef struct janus_sipre_media {
 	char *remote_ip;
 	gboolean earlymedia;
+	gboolean update;
 	gboolean ready;
 	gboolean autoack;
 	gboolean require_srtp, has_srtp_local, has_srtp_remote;
@@ -1096,6 +1097,7 @@ void janus_sipre_create_session(janus_plugin_session *handle, int *error) {
 	session->sdp = NULL;
 	session->media.remote_ip = NULL;
 	session->media.earlymedia = FALSE;
+	session->media.update = FALSE;
 	session->media.ready = FALSE;
 	session->media.autoack = TRUE;
 	session->media.require_srtp = FALSE;
@@ -1459,8 +1461,6 @@ static void *janus_sipre_handler(void *data) {
 	json_t *root = NULL;
 	while(g_atomic_int_get(&initialized) && !g_atomic_int_get(&stopping)) {
 		msg = g_async_queue_pop(messages);
-		if(msg == NULL)
-			continue;
 		if(msg == &exit_message)
 			break;
 		if(msg->handle == NULL) {
@@ -2110,6 +2110,68 @@ static void *janus_sipre_handler(void *data) {
 					JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to launch the RTP/RTCP thread...\n", error->code, error->message ? error->message : "??");
 				}
 			}
+		} else if(!strcasecmp(request_text, "update")) {
+			/* Update an existing call */
+			if(!(session->status == janus_sipre_call_status_inviting || session->status == janus_sipre_call_status_incall)) {
+				JANUS_LOG(LOG_ERR, "Wrong state (not in a call? status=%s)\n", janus_sipre_call_status_string(session->status));
+				g_snprintf(error_cause, 512, "Wrong state (not in a call?)");
+				goto error;
+			}
+			if(session->callee == NULL) {
+				JANUS_LOG(LOG_ERR, "Wrong state (no callee?)\n");
+				error_code = JANUS_SIPRE_ERROR_WRONG_STATE;
+				g_snprintf(error_cause, 512, "Wrong state (no callee?)");
+				goto error;
+			}
+			if(session->sdp == NULL) {
+				JANUS_LOG(LOG_ERR, "Wrong state (no local SDP?)\n");
+				error_code = JANUS_SIPRE_ERROR_WRONG_STATE;
+				g_snprintf(error_cause, 512, "Wrong state (no local SDP?)");
+				goto error;
+			}
+			/* Any SDP to handle? if not, something's wrong */
+			const char *msg_sdp = json_string_value(json_object_get(msg->jsep, "sdp"));
+			if(!msg_sdp) {
+				JANUS_LOG(LOG_ERR, "Missing SDP update\n");
+				error_code = JANUS_SIPRE_ERROR_MISSING_SDP;
+				g_snprintf(error_cause, 512, "Missing SDP update");
+				goto error;
+			}
+			if(!json_is_true(json_object_get(msg->jsep, "update"))) {
+				JANUS_LOG(LOG_ERR, "Missing SDP update\n");
+				error_code = JANUS_SIPRE_ERROR_MISSING_SDP;
+				g_snprintf(error_cause, 512, "Missing SDP update");
+				goto error;
+			}
+			/* Parse the SDP we got, manipulate some things, and generate a new one */
+			char sdperror[100];
+			janus_sdp *parsed_sdp = janus_sdp_parse(msg_sdp, sdperror, sizeof(sdperror));
+			if(!parsed_sdp) {
+				JANUS_LOG(LOG_ERR, "Error parsing SDP: %s\n", sdperror);
+				error_code = JANUS_SIPRE_ERROR_MISSING_SDP;
+				g_snprintf(error_cause, 512, "Error parsing SDP: %s", sdperror);
+				goto error;
+			}
+			session->sdp->o_version++;
+			char *sdp = janus_sipre_sdp_manipulate(session, parsed_sdp, FALSE);
+			if(sdp == NULL) {
+				JANUS_LOG(LOG_ERR, "Error manipulating SDP\n");
+				janus_sdp_destroy(parsed_sdp);
+				error_code = JANUS_SIPRE_ERROR_IO_ERROR;
+				g_snprintf(error_cause, 512, "Error manipulating SDP");
+				goto error;
+			}
+			/* Take note of the new SDP */
+			janus_sdp_destroy(session->sdp);
+			session->sdp = parsed_sdp;
+			session->media.update = TRUE;
+			JANUS_LOG(LOG_VERB, "Prepared SDP for update:\n%s", sdp);
+			/* Send the re-INVITE */
+			session->temp_sdp = sdp;
+			mqueue_push(mq, janus_sipre_mqueue_event_do_update, janus_sipre_mqueue_payload_create(session, NULL, 0, data));
+			/* Send an ack back */
+			result = json_object();
+			json_object_set_new(result, "event", json_string("updating"));
 		} else if(!strcasecmp(request_text, "decline")) {
 			/* Reject an incoming call */
 			if(session->status != janus_sipre_call_status_invited) {
@@ -2127,6 +2189,7 @@ static void *janus_sipre_handler(void *data) {
 				goto error;
 			}
 			session->media.earlymedia = FALSE;
+			session->media.update = FALSE;
 			session->media.ready = FALSE;
 			session->media.on_hold = FALSE;
 			session->status = janus_sipre_call_status_closing;
@@ -2246,6 +2309,7 @@ static void *janus_sipre_handler(void *data) {
 				goto error;
 			}
 			session->media.earlymedia = FALSE;
+			session->media.update = FALSE;
 			session->media.ready = FALSE;
 			session->media.on_hold = FALSE;
 			session->status = janus_sipre_call_status_closing;
@@ -2910,8 +2974,8 @@ static int janus_sipre_allocate_local_ports(janus_sipre_session *session) {
 				/* RTP socket is not valid anymore, reset it */
 				close(session->media.video_rtp_fd);
 				session->media.video_rtp_fd = -1;
-				close(session->media.video_rtp_fd);
-				session->media.video_rtp_fd = -1;
+				close(session->media.video_rtcp_fd);
+				session->media.video_rtcp_fd = -1;
 				attempts--;
 				continue;
 			}
@@ -3005,7 +3069,7 @@ static void *janus_sipre_relay_thread(void *data) {
 	/* File descriptors */
 	socklen_t addrlen;
 	struct sockaddr_in remote;
-	int resfd = 0, bytes = 0;
+	int resfd = 0, bytes = 0, pollerrs = 0;
 	struct pollfd fds[5];
 	int pipe_fd = session->media.pipefd[0];
 	char buffer[1500];
@@ -3099,16 +3163,20 @@ static void *janus_sipre_relay_thread(void *data) {
 							session->account.username, strerror(error));
 						close(session->media.audio_rtcp_fd);
 						session->media.audio_rtcp_fd = -1;
+						continue;
 					} else if(fds[i].fd == session->media.video_rtcp_fd) {
 						JANUS_LOG(LOG_WARN, "[SIPre-%s] Got a '%s' on the video RTCP socket, closing it\n",
 							session->account.username, strerror(error));
 						close(session->media.video_rtcp_fd);
 						session->media.video_rtcp_fd = -1;
+						continue;
 					}
-					/* FIXME Should we do the same with the RTP sockets as well? We may risk overreacting, there... */
-					continue;
 				}
-				JANUS_LOG(LOG_ERR, "[SIPre-%s] Error polling %d (socket #%d): %s...\n", session->account.username,
+				/* FIXME Should we be more tolerant of ICMP errors on RTP sockets as well? */
+				pollerrs++;
+				if(pollerrs < 100)
+					continue;
+				JANUS_LOG(LOG_ERR, "[SIPre-%s] Too many errors polling %d (socket #%d): %s...\n", session->account.username,
 					fds[i].fd, i, fds[i].revents & POLLERR ? "POLLERR" : "POLLHUP");
 				JANUS_LOG(LOG_ERR, "[SIPre-%s]   -- %d (%s)\n", session->account.username, error, strerror(error));
 				/* Can we assume it's pretty much over, after a POLLERR? */
@@ -3140,6 +3208,7 @@ static void *janus_sipre_relay_thread(void *data) {
 				gboolean rtcp = fds[i].fd == session->media.audio_rtcp_fd || fds[i].fd == session->media.video_rtcp_fd;
 				if(!rtcp) {
 					/* Audio or Video RTP */
+					pollerrs = 0;
 					rtp_header *header = (rtp_header *)buffer;
 					if((video && session->media.video_ssrc_peer != ntohl(header->ssrc)) ||
 							(!video && session->media.audio_ssrc_peer != ntohl(header->ssrc))) {
@@ -3626,6 +3695,7 @@ int janus_sipre_cb_answer(const struct sip_msg *msg, void *arg) {
 		janus_sdp_destroy(sdp);
 		/* Hangup immediately */
 		session->media.earlymedia = FALSE;
+		session->media.update = FALSE;
 		session->media.ready = FALSE;
 		session->media.on_hold = FALSE;
 		session->status = janus_sipre_call_status_closing;
@@ -3640,6 +3710,7 @@ int janus_sipre_cb_answer(const struct sip_msg *msg, void *arg) {
 		janus_sdp_destroy(sdp);
 		/* Hangup immediately */
 		session->media.earlymedia = FALSE;
+		session->media.update = FALSE;
 		session->media.ready = FALSE;
 		session->media.on_hold = FALSE;
 		session->status = janus_sipre_call_status_closing;
@@ -3657,12 +3728,12 @@ int janus_sipre_cb_answer(const struct sip_msg *msg, void *arg) {
 		JANUS_LOG(LOG_VERB, "Detected video codec: %d (%s)\n", session->media.video_pt, session->media.video_pt_name);
 	}
 	session->media.ready = TRUE;	/* FIXME Maybe we need a better way to signal this */
-	if(update && !session->media.earlymedia) {
+	if(update && !session->media.earlymedia && !session->media.update) {
 		/* Don't push to the browser if this is in response to a hold/unhold we sent ourselves */
 		JANUS_LOG(LOG_WARN, "This is an update to an existing call (possibly in response to hold/unhold)\n");
 		return 0;
 	}
-	if(!session->media.earlymedia) {
+	if(!session->media.earlymedia && !session->media.earlymedia) {
 		GError *error = NULL;
 		char tname[16];
 		g_snprintf(tname, sizeof(tname), "siprertp %s", session->account.username);
@@ -3699,13 +3770,17 @@ int janus_sipre_cb_answer(const struct sip_msg *msg, void *arg) {
 	json_decref(jsep);
 	janus_sdp_destroy(sdp);
 	/* Also notify event handlers */
-	if(notify_events && gateway->events_is_enabled()) {
+	if(!session->media.update && notify_events && gateway->events_is_enabled()) {
 		json_t *info = json_object();
 		json_object_set_new(info, "event", json_string(in_progress ? "progress" : "accepted"));
 		if(session->callid)
 			json_object_set_new(info, "call-id", json_string(session->callid));
 		json_object_set_new(info, "username", json_string(session->callee));
 		gateway->notify_event(&janus_sipre_plugin, session->handle, info);
+	}
+	if(session->media.update) {
+		/* We just received a 200 OK to an update we sent */
+		session->media.update = FALSE;
 	}
 
 	return 0;
@@ -3812,6 +3887,7 @@ void janus_sipre_cb_closed(int err, const struct sip_msg *msg, void *arg) {
 	mem_deref(session->stack.sess);
 	session->stack.sess = NULL;
 	session->media.earlymedia = FALSE;
+	session->media.update = FALSE;
 	session->media.ready = FALSE;
 	session->media.on_hold = FALSE;
 	session->status = janus_sipre_call_status_idle;
@@ -4099,6 +4175,7 @@ void janus_sipre_mqueue_handler(int id, void *data, void *arg) {
 						/* Send an error message on the current call */
 						err = sipsess_reject(session->stack.sess, payload->rcode, janus_sipre_error_reason(payload->rcode), NULL);
 						session->media.earlymedia = FALSE;
+						session->media.update = FALSE;
 						session->media.ready = FALSE;
 						session->media.on_hold = FALSE;
 						session->status = janus_sipre_call_status_idle;
@@ -4233,6 +4310,7 @@ void janus_sipre_mqueue_handler(int id, void *data, void *arg) {
 				gateway->notify_event(&janus_sipre_plugin, session->handle, info);
 			}
 			session->media.earlymedia = FALSE;
+			session->media.update = FALSE;
 			session->media.ready = FALSE;
 			session->media.on_hold = FALSE;
 			session->status = janus_sipre_call_status_idle;
