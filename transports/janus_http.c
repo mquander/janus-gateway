@@ -572,6 +572,12 @@ static void janus_http_add_cors_headers(janus_http_msg *msg, struct MHD_Response
 		MHD_add_response_header(response, "Access-Control-Allow-Headers", msg->acrh);
 }
 
+/* Static callback that we register to */
+static void janus_http_mhd_panic(void *cls, const char *file, unsigned int line, const char *reason) {
+	JANUS_LOG(LOG_WARN, "[%s]: Error in GNU libmicrohttpd %s:%u: %s\n",
+		JANUS_REST_PACKAGE, file, line, reason);
+}
+
 /* Transport implementation */
 int janus_http_init(janus_transport_callbacks *callback, const char *config_path) {
 	if(g_atomic_int_get(&stopping)) {
@@ -589,6 +595,9 @@ int janus_http_init(janus_transport_callbacks *callback, const char *config_path
 
 	/* This is the callback we'll need to invoke to contact the gateway */
 	gateway = callback;
+
+	/* Register a function to detect problems for which MHD would typically abort */
+	MHD_set_panic_func(&janus_http_mhd_panic, NULL);
 
 	/* Read configuration */
 	char filename[255];
@@ -1177,22 +1186,10 @@ int janus_http_handler(void *cls, struct MHD_Connection *connection, const char 
 	JANUS_LOG(LOG_DBG, " ... parsing request...\n");
 	if(path != NULL && path[1] != NULL && strlen(path[1]) > 0) {
 		session_path = g_strdup(path[1]);
-		if(session_path == NULL) {
-			JANUS_LOG(LOG_FATAL, "Memory error!\n");
-			ret = MHD_queue_response(connection, MHD_HTTP_INTERNAL_SERVER_ERROR, response);
-			MHD_destroy_response(response);
-			goto done;
-		}
 		JANUS_LOG(LOG_HUGE, "Session: %s\n", session_path);
 	}
 	if(session_path != NULL && path[2] != NULL && strlen(path[2]) > 0) {
 		handle_path = g_strdup(path[2]);
-		if(handle_path == NULL) {
-			JANUS_LOG(LOG_FATAL, "Memory error!\n");
-			ret = MHD_queue_response(connection, MHD_HTTP_INTERNAL_SERVER_ERROR, response);
-			MHD_destroy_response(response);
-			goto done;
-		}
 		JANUS_LOG(LOG_HUGE, "Handle: %s\n", handle_path);
 	}
 	if(session_path != NULL && handle_path != NULL && path[3] != NULL && strlen(path[3]) > 0) {
@@ -1537,22 +1534,10 @@ int janus_http_admin_handler(void *cls, struct MHD_Connection *connection, const
 	JANUS_LOG(LOG_DBG, " ... parsing request...\n");
 	if(path != NULL && path[1] != NULL && strlen(path[1]) > 0) {
 		session_path = g_strdup(path[1]);
-		if(session_path == NULL) {
-			JANUS_LOG(LOG_FATAL, "Memory error!\n");
-			ret = MHD_queue_response(connection, MHD_HTTP_INTERNAL_SERVER_ERROR, response);
-			MHD_destroy_response(response);
-			goto done;
-		}
 		JANUS_LOG(LOG_HUGE, "Session: %s\n", session_path);
 	}
 	if(session_path != NULL && path[2] != NULL && strlen(path[2]) > 0) {
 		handle_path = g_strdup(path[2]);
-		if(handle_path == NULL) {
-			JANUS_LOG(LOG_FATAL, "Memory error!\n");
-			ret = MHD_queue_response(connection, MHD_HTTP_INTERNAL_SERVER_ERROR, response);
-			MHD_destroy_response(response);
-			goto done;
-		}
 		JANUS_LOG(LOG_HUGE, "Handle: %s\n", handle_path);
 	}
 	if(session_path != NULL && handle_path != NULL && path[3] != NULL && strlen(path[3]) > 0) {

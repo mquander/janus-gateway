@@ -487,7 +487,7 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 			/* Create the WebSocket context */
 			wss = lws_create_vhost(wsc, &info);
 			if(wss == NULL) {
-				JANUS_LOG(LOG_FATAL, "Error initializing libwebsockets...\n");
+				JANUS_LOG(LOG_FATAL, "Error creating vhost for WebSockets server...\n");
 			} else {
 				JANUS_LOG(LOG_INFO, "WebSockets server started (port %d)...\n", wsport);
 			}
@@ -544,7 +544,7 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 				/* Create the secure WebSocket context */
 				swss = lws_create_vhost(wsc, &info);
 				if(swss == NULL) {
-					JANUS_LOG(LOG_FATAL, "Error initializing libwebsockets...\n");
+					JANUS_LOG(LOG_FATAL, "Error creating vhost for Secure WebSockets server...\n");
 				} else {
 					JANUS_LOG(LOG_INFO, "Secure WebSockets server started (port %d)...\n", wsport);
 				}
@@ -589,7 +589,7 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 			/* Create the WebSocket context */
 			admin_wss = lws_create_vhost(wsc, &info);
 			if(admin_wss == NULL) {
-				JANUS_LOG(LOG_FATAL, "Error initializing libwebsockets...\n");
+				JANUS_LOG(LOG_FATAL, "Error creating vhost for Admin WebSockets server...\n");
 			} else {
 				JANUS_LOG(LOG_INFO, "Admin WebSockets server started (port %d)...\n", wsport);
 			}
@@ -646,7 +646,7 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 				/* Create the secure WebSocket context */
 				admin_swss = lws_create_vhost(wsc, &info);
 				if(admin_swss == NULL) {
-					JANUS_LOG(LOG_FATAL, "Error initializing libwebsockets...\n");
+					JANUS_LOG(LOG_FATAL, "Error creating vhost for Secure Admin WebSockets server...\n");
 				} else {
 					JANUS_LOG(LOG_INFO, "Secure Admin WebSockets server started (port %d)...\n", wsport);
 				}
@@ -954,10 +954,6 @@ static int janus_websockets_common_callback(
 				size_t offset = strlen(ws_client->incoming);
 				JANUS_LOG(LOG_HUGE, "[%s-%p] Appending fragment: offset %zu, %zu bytes, %zu remaining\n", log_prefix, wsi, offset, len, remaining);
 				ws_client->incoming = g_realloc(ws_client->incoming, offset+len+1);
-				if(ws_client->incoming == NULL) {
-					JANUS_LOG(LOG_FATAL, "Memory error!\n");
-					return 0;
-				}
 				memcpy(ws_client->incoming+offset, in, len);
 				ws_client->incoming[offset+len] = '\0';
 				JANUS_LOG(LOG_HUGE, "%s\n", ws_client->incoming+offset);
@@ -1015,11 +1011,6 @@ static int janus_websockets_common_callback(
 						JANUS_LOG(LOG_HUGE, "[%s-%p] Re-allocating to %d bytes (was %d, response is %zu bytes)\n", log_prefix, wsi, buflen, ws_client->buflen, strlen(response));
 						ws_client->buflen = buflen;
 						ws_client->buffer = g_realloc(ws_client->buffer, buflen);
-						if(ws_client->buffer == NULL) {
-							JANUS_LOG(LOG_FATAL, "Memory error!\n");
-							janus_mutex_unlock(&ws_client->ts->mutex);
-							return 0;
-						}
 					}
 					memcpy(ws_client->buffer + LWS_SEND_BUFFER_PRE_PADDING, response, strlen(response));
 					JANUS_LOG(LOG_HUGE, "[%s-%p] Sending WebSocket message (%zu bytes)...\n", log_prefix, wsi, strlen(response));

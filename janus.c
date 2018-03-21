@@ -131,6 +131,10 @@ static struct janus_json_parameter mnq_parameters[] = {
 static struct janus_json_parameter nmt_parameters[] = {
 	{"no_media_timer", JSON_INTEGER, JANUS_JSON_PARAM_REQUIRED | JANUS_JSON_PARAM_POSITIVE}
 };
+static struct janus_json_parameter queryhandler_parameters[] = {
+	{"handler", JSON_STRING, JANUS_JSON_PARAM_REQUIRED},
+	{"request", JSON_OBJECT, 0}
+};
 static struct janus_json_parameter text2pcap_parameters[] = {
 	{"folder", JSON_STRING, 0},
 	{"filename", JSON_STRING, 0},
@@ -222,6 +226,7 @@ static json_t *janus_info(const char *transaction) {
 	json_object_set_new(info, "ice-lite", janus_ice_is_ice_lite_enabled() ? json_true() : json_false());
 	json_object_set_new(info, "ice-tcp", janus_ice_is_ice_tcp_enabled() ? json_true() : json_false());
 	json_object_set_new(info, "full-trickle", janus_ice_is_full_trickle_enabled() ? json_true() : json_false());
+	json_object_set_new(info, "rfc-4588", janus_is_rfc4588_enabled() ? json_true() : json_false());
 	if(janus_ice_get_stun_server() != NULL) {
 		char server[255];
 		g_snprintf(server, 255, "%s:%"SCNu16, janus_ice_get_stun_server(), janus_ice_get_stun_port());
@@ -378,7 +383,9 @@ static janus_transport_callbacks janus_handler_transport =
 		.events_is_enabled = janus_events_is_enabled,
 		.notify_event = janus_transport_notify_event,
 	};
-GThreadPool *tasks = NULL;
+static GAsyncQueue *requests = NULL;
+static janus_request exit_message;
+static GThreadPool *tasks = NULL;
 void janus_transport_task(gpointer data, gpointer user_data);
 ///@}
 
@@ -397,6 +404,8 @@ void janus_plugin_relay_data(janus_plugin_session *plugin_session, char *buf, in
 void janus_plugin_close_pc(janus_plugin_session *plugin_session);
 void janus_plugin_end_session(janus_plugin_session *plugin_session);
 void janus_plugin_notify_event(janus_plugin *plugin, janus_plugin_session *plugin_session, json_t *event);
+gboolean janus_plugin_auth_is_signature_valid(janus_plugin *plugin, const char *token);
+gboolean janus_plugin_auth_signature_contains(janus_plugin *plugin, const char *token, const char *desc);
 static janus_callbacks janus_handler_plugin =
 	{
 		.push_event = janus_plugin_push_event,
@@ -407,7 +416,9 @@ static janus_callbacks janus_handler_plugin =
 		.end_session = janus_plugin_end_session,
 		.events_is_enabled = janus_events_is_enabled,
 		.notify_event = janus_plugin_notify_event,
-	}; 
+		.auth_is_signature_valid = janus_plugin_auth_is_signature_valid,
+		.auth_signature_contains = janus_plugin_auth_signature_contains,
+	};
 ///@}
 
 
@@ -644,7 +655,7 @@ janus_request *janus_request_new(janus_transport *transport, janus_transport_ses
 }
 
 void janus_request_destroy(janus_request *request) {
-	if(request == NULL)
+	if(request == NULL || request == &exit_message)
 		return;
 	request->transport = NULL;
 	janus_refcount_decrease(&request->instance->ref);
@@ -1449,8 +1460,8 @@ static int janus_request_allow_token(janus_request *request, guint64 session_id,
 	int error_code = 0;
 	char error_cause[100];
 	json_t *root = request->message;
-	if(!janus_auth_is_enabled()) {
-		ret = janus_process_error(request, session_id, transaction_text, JANUS_ERROR_UNKNOWN, "Token based authentication disabled");
+	if(!janus_auth_is_stored_mode()) {
+		ret = janus_process_error(request, session_id, transaction_text, JANUS_ERROR_UNKNOWN, "Stored-Token based authentication disabled");
 		goto jsondone;
 	}
 	JANUS_VALIDATE_JSON_OBJECT(root, add_token_parameters,
@@ -1800,6 +1811,40 @@ int janus_process_incoming_admin_request(janus_request *request) {
 			/* Send the success reply */
 			ret = janus_process_success(request, reply);
 			goto jsondone;
+		} else if(!strcasecmp(message_text, "query_eventhandler")) {
+			/* Contact an event handler and expect a response */
+			JANUS_VALIDATE_JSON_OBJECT(root, queryhandler_parameters,
+				error_code, error_cause, FALSE,
+				JANUS_ERROR_MISSING_MANDATORY_ELEMENT, JANUS_ERROR_INVALID_ELEMENT_TYPE);
+			if(error_code != 0) {
+				ret = janus_process_error_string(request, session_id, transaction_text, error_code, error_cause);
+				goto jsondone;
+			}
+			json_t *handler = json_object_get(root, "handler");
+			const char *handler_value = json_string_value(handler);
+			janus_eventhandler *evh = g_hash_table_lookup(eventhandlers, handler_value);
+			if(evh == NULL) {
+				/* No such handler... */
+				g_snprintf(error_cause, sizeof(error_cause), "%s", "Invalid event handler");
+				ret = janus_process_error_string(request, session_id, transaction_text, JANUS_ERROR_PLUGIN_NOT_FOUND, error_cause);
+				goto jsondone;
+			}
+			if(evh->handle_request == NULL) {
+				/* Handler doesn't implement the hook... */
+				g_snprintf(error_cause, sizeof(error_cause), "%s", "Event handler doesn't support queries");
+				ret = janus_process_error_string(request, session_id, transaction_text, JANUS_ERROR_UNKNOWN, error_cause);
+				goto jsondone;
+			}
+			json_t *query = json_object_get(root, "request");
+			json_t *response = evh->handle_request(query);
+			/* Prepare JSON reply */
+			json_t *reply = json_object();
+			json_object_set_new(reply, "janus", json_string("success"));
+			json_object_set_new(reply, "transaction", json_string(transaction_text));
+			json_object_set_new(reply, "response", response ? response : json_object());
+			/* Send the success reply */
+			ret = janus_process_success(request, reply);
+			goto jsondone;
 		} else if(!strcasecmp(message_text, "list_sessions")) {
 			/* List sessions */
 			session_id = 0;
@@ -1830,8 +1875,8 @@ int janus_process_incoming_admin_request(janus_request *request) {
 			goto jsondone;
 		} else if(!strcasecmp(message_text, "list_tokens")) {
 			/* List all the valid tokens */
-			if(!janus_auth_is_enabled()) {
-				ret = janus_process_error(request, session_id, transaction_text, JANUS_ERROR_UNKNOWN, "Token based authentication disabled");
+			if(!janus_auth_is_stored_mode()) {
+				ret = janus_process_error(request, session_id, transaction_text, JANUS_ERROR_UNKNOWN, "Stored-Token based authentication disabled");
 				goto jsondone;
 			}
 			json_t *tokens_list = json_array();
@@ -1875,8 +1920,8 @@ int janus_process_incoming_admin_request(janus_request *request) {
 			goto jsondone;
 		} else if(!strcasecmp(message_text, "remove_token")) {
 			/* Invalidate a token for authentication purposes */
-			if(!janus_auth_is_enabled()) {
-				ret = janus_process_error(request, session_id, transaction_text, JANUS_ERROR_UNKNOWN, "Token based authentication disabled");
+			if(!janus_auth_is_stored_mode()) {
+				ret = janus_process_error(request, session_id, transaction_text, JANUS_ERROR_UNKNOWN, "Stored-Token based authentication disabled");
 				goto jsondone;
 			}
 			JANUS_VALIDATE_JSON_OBJECT(root, token_parameters,
@@ -2057,6 +2102,7 @@ int janus_process_incoming_admin_request(janus_request *request) {
 		json_object_set_new(flags, "data-channels", janus_flags_is_set(&handle->webrtc_flags, JANUS_ICE_HANDLE_WEBRTC_DATA_CHANNELS) ? json_true() : json_false());
 		json_object_set_new(flags, "has-audio", janus_flags_is_set(&handle->webrtc_flags, JANUS_ICE_HANDLE_WEBRTC_HAS_AUDIO) ? json_true() : json_false());
 		json_object_set_new(flags, "has-video", janus_flags_is_set(&handle->webrtc_flags, JANUS_ICE_HANDLE_WEBRTC_HAS_VIDEO) ? json_true() : json_false());
+		json_object_set_new(flags, "rfc4588-rtx", janus_flags_is_set(&handle->webrtc_flags, JANUS_ICE_HANDLE_WEBRTC_RFC4588_RTX) ? json_true() : json_false());
 		json_object_set_new(flags, "cleaning", janus_flags_is_set(&handle->webrtc_flags, JANUS_ICE_HANDLE_WEBRTC_CLEANING) ? json_true() : json_false());
 		json_object_set_new(info, "flags", flags);
 		if(handle->agent) {
@@ -2164,16 +2210,22 @@ json_t *janus_admin_stream_summary(janus_ice_stream *stream) {
 		json_object_set_new(ss, "audio", json_integer(stream->audio_ssrc));
 	if(stream->video_ssrc)
 		json_object_set_new(ss, "video", json_integer(stream->video_ssrc));
+	if(stream->video_ssrc_rtx)
+		json_object_set_new(ss, "video-rtx", json_integer(stream->video_ssrc_rtx));
 	if(stream->audio_ssrc_peer)
 		json_object_set_new(ss, "audio-peer", json_integer(stream->audio_ssrc_peer));
 	if(stream->video_ssrc_peer[0])
 		json_object_set_new(ss, "video-peer", json_integer(stream->video_ssrc_peer[0]));
-	if(stream->video_ssrc_peer_rtx)
-		json_object_set_new(ss, "video-peer-rtx", json_integer(stream->video_ssrc_peer_rtx));
 	if(stream->video_ssrc_peer[1])
 		json_object_set_new(ss, "video-peer-sim-1", json_integer(stream->video_ssrc_peer[1]));
 	if(stream->video_ssrc_peer[2])
 		json_object_set_new(ss, "video-peer-sim-2", json_integer(stream->video_ssrc_peer[2]));
+	if(stream->video_ssrc_peer_rtx[0])
+		json_object_set_new(ss, "video-peer-rtx", json_integer(stream->video_ssrc_peer_rtx[0]));
+	if(stream->video_ssrc_peer_rtx[1])
+		json_object_set_new(ss, "video-peer-sim-1-rtx", json_integer(stream->video_ssrc_peer_rtx[1]));
+	if(stream->video_ssrc_peer_rtx[2])
+		json_object_set_new(ss, "video-peer-sim-2-rtx", json_integer(stream->video_ssrc_peer_rtx[2]));
 	if(stream->rid[0]) {
 		json_t *rid = json_array();
 		json_array_append_new(rid, json_string(stream->rid[0]));
@@ -2198,6 +2250,8 @@ json_t *janus_admin_stream_summary(janus_ice_stream *stream) {
 			json_object_set_new(sc, "audio-codec", json_string(stream->audio_codec));
 		if(stream->video_payload_type > -1)
 			json_object_set_new(sc, "video-pt", json_integer(stream->video_payload_type));
+		if(stream->video_rtx_payload_type > -1)
+			json_object_set_new(sc, "video-rtx-pt", json_integer(stream->video_rtx_payload_type));
 		if(stream->video_codec != NULL)
 			json_object_set_new(sc, "video-codec", json_string(stream->video_codec));
 		json_object_set_new(s, "codecs", sc);
@@ -2218,6 +2272,10 @@ json_t *janus_admin_stream_summary(janus_ice_stream *stream) {
 		json_object_set_new(audio_rtcp_stats, "lost-by-remote", json_integer(janus_rtcp_context_get_lost_all(stream->audio_rtcp_ctx, TRUE)));
 		json_object_set_new(audio_rtcp_stats, "jitter-local", json_integer(janus_rtcp_context_get_jitter(stream->audio_rtcp_ctx, FALSE)));
 		json_object_set_new(audio_rtcp_stats, "jitter-remote", json_integer(janus_rtcp_context_get_jitter(stream->audio_rtcp_ctx, TRUE)));
+		json_object_set_new(audio_rtcp_stats, "in-link-quality", json_integer(janus_rtcp_context_get_in_link_quality(stream->audio_rtcp_ctx)));
+		json_object_set_new(audio_rtcp_stats, "in-media-link-quality", json_integer(janus_rtcp_context_get_in_media_link_quality(stream->audio_rtcp_ctx)));
+		json_object_set_new(audio_rtcp_stats, "out-link-quality", json_integer(janus_rtcp_context_get_out_link_quality(stream->audio_rtcp_ctx)));
+		json_object_set_new(audio_rtcp_stats, "out-media-link-quality", json_integer(janus_rtcp_context_get_out_media_link_quality(stream->audio_rtcp_ctx)));
 		json_object_set_new(rtcp_stats, "audio", audio_rtcp_stats);
 	}
 	int vindex=0;
@@ -2233,6 +2291,10 @@ json_t *janus_admin_stream_summary(janus_ice_stream *stream) {
 			json_object_set_new(video_rtcp_stats, "lost-by-remote", json_integer(janus_rtcp_context_get_lost_all(stream->video_rtcp_ctx[vindex], TRUE)));
 			json_object_set_new(video_rtcp_stats, "jitter-local", json_integer(janus_rtcp_context_get_jitter(stream->video_rtcp_ctx[vindex], FALSE)));
 			json_object_set_new(video_rtcp_stats, "jitter-remote", json_integer(janus_rtcp_context_get_jitter(stream->video_rtcp_ctx[vindex], TRUE)));
+			json_object_set_new(video_rtcp_stats, "in-link-quality", json_integer(janus_rtcp_context_get_in_link_quality(stream->video_rtcp_ctx[vindex])));
+			json_object_set_new(video_rtcp_stats, "in-media-link-quality", json_integer(janus_rtcp_context_get_in_media_link_quality(stream->video_rtcp_ctx[vindex])));
+			json_object_set_new(video_rtcp_stats, "out-link-quality", json_integer(janus_rtcp_context_get_out_link_quality(stream->video_rtcp_ctx[vindex])));
+			json_object_set_new(video_rtcp_stats, "out-media-link-quality", json_integer(janus_rtcp_context_get_out_media_link_quality(stream->video_rtcp_ctx[vindex])));
 			if(vindex == 0)
 				json_object_set_new(rtcp_stats, "video", video_rtcp_stats);
 			else if(vindex == 1)
@@ -2380,16 +2442,8 @@ void janus_transport_incoming_request(janus_transport *plugin, janus_transport_s
 	JANUS_LOG(LOG_VERB, "Got %s API request from %s (%p)\n", admin ? "an admin" : "a Janus", plugin->get_package(), transport);
 	/* Create a janus_request instance to handle the request */
 	janus_request *request = janus_request_new(plugin, transport, request_id, admin, message);
-	GError *tperror = NULL;
-	g_thread_pool_push(tasks, request, &tperror);
-	if(tperror != NULL) {
-		/* Something went wrong... */
-		JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to push task in thread pool...\n", tperror->code, tperror->message ? tperror->message : "??");
-		json_t *transaction = json_object_get(message, "transaction");
-		const char *transaction_text = json_is_string(transaction) ? json_string_value(transaction) : NULL;
-		janus_process_error(request, 0, transaction_text, JANUS_ERROR_UNKNOWN, "Thread pool error");
-		janus_request_destroy(request);
-	}
+	/* Enqueue the request, the thread will pick it up */
+	g_async_queue_push(requests, request);
 }
 
 void janus_transport_gone(janus_transport *plugin, janus_transport_session *transport) {
@@ -2461,6 +2515,51 @@ void janus_transport_task(gpointer data, gpointer user_data) {
 		janus_process_incoming_admin_request(request);
 	/* Done */
 	janus_request_destroy(request);
+}
+
+
+/* Thread to handle incoming requests: may involve an asynchronous task for plugin messaging */
+static void *janus_transport_requests(void *data) {
+	JANUS_LOG(LOG_INFO, "Joining Janus requests handler thread\n");
+	janus_request *request = NULL;
+	gboolean destroy = FALSE;
+	while(!g_atomic_int_get(&stop)) {
+		request = g_async_queue_pop(requests);
+		if(request == &exit_message)
+			break;
+		/* Should we process the request synchronously or with a task from the thread pool? */
+		destroy = TRUE;
+		if(!request->admin) {
+			/* Process the request synchronously only it's not a message for a plugin */
+			json_t *message = json_object_get(request->message, "janus");
+			const gchar *message_text = json_string_value(message);
+			if(message_text && !strcasecmp(message_text, "message")) {
+				/* Spawn a task thread */
+				GError *tperror = NULL;
+				g_thread_pool_push(tasks, request, &tperror);
+				if(tperror != NULL) {
+					/* Something went wrong... */
+					JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to push task in thread pool...\n", tperror->code, tperror->message ? tperror->message : "??");
+					json_t *transaction = json_object_get(message, "transaction");
+					const char *transaction_text = json_is_string(transaction) ? json_string_value(transaction) : NULL;
+					janus_process_error(request, 0, transaction_text, JANUS_ERROR_UNKNOWN, "Thread pool error");
+				} else {
+					/* Don't destroy the request now, the task will take care of that */
+					destroy = FALSE;
+				}
+			} else {
+				janus_process_incoming_request(request);
+			}
+		} else {
+			/* Admin requests are always handled synchronously */
+			janus_process_incoming_admin_request(request);
+		}
+		/* Done */
+		if(destroy)
+			janus_request_destroy(request);
+	}
+	JANUS_LOG(LOG_INFO, "Leaving Janus requests handler thread\n");
+	return NULL;
 }
 
 
@@ -2656,6 +2755,10 @@ json_t *janus_plugin_handle_sdp(janus_plugin_session *plugin_session, janus_plug
 			}
 		}
 		if(ice_handle->agent == NULL) {
+			if(janus_is_rfc4588_enabled()) {
+				/* We still need to configure the WebRTC stuff: negotiate RFC4588 by default */
+				janus_flags_set(&ice_handle->webrtc_flags, JANUS_ICE_HANDLE_WEBRTC_RFC4588_RTX);
+			}
 			/* Process SDP in order to setup ICE locally (this is going to result in an answer from the browser) */
 			if(janus_ice_setup_local(ice_handle, 0, audio, video, data, 1) < 0) {
 				JANUS_LOG(LOG_ERR, "[%"SCNu64"] Error setting ICE locally\n", ice_handle->handle_id);
@@ -2701,6 +2804,40 @@ json_t *janus_plugin_handle_sdp(janus_plugin_session *plugin_session, janus_plug
 	if(offer && restart)
 		janus_ice_restart(ice_handle);
 	/* Add our details */
+	janus_ice_stream *stream = ice_handle->stream;
+	if(janus_flags_is_set(&ice_handle->webrtc_flags, JANUS_ICE_HANDLE_WEBRTC_RFC4588_RTX) &&
+			stream && stream->rtx_payload_types == NULL) {
+		/* Make sure we have a list of rtx payload types to generate, if needed */
+		janus_sdp_mline *m = janus_sdp_mline_find(parsed_sdp, JANUS_SDP_VIDEO);
+		if(m && m->ptypes) {
+			stream->rtx_payload_types = g_hash_table_new(NULL, NULL);
+			GList *ptypes = g_list_copy(m->ptypes), *tempP = ptypes;
+			GList *rtx_ptypes = g_hash_table_get_values(stream->rtx_payload_types);
+			while(tempP) {
+				int ptype = GPOINTER_TO_INT(tempP->data);
+				int rtx_ptype = ptype+1;
+				while(g_list_find(m->ptypes, GINT_TO_POINTER(rtx_ptype))
+						|| g_list_find(rtx_ptypes, GINT_TO_POINTER(rtx_ptype))) {
+					rtx_ptype++;
+					if(rtx_ptype > 127)
+						rtx_ptype = 96;
+					if(rtx_ptype == ptype) {
+						/* We did a whole round? should never happen... */
+						rtx_ptype = -1;
+						break;
+					}
+				}
+				if(rtx_ptype > 0)
+					g_hash_table_insert(stream->rtx_payload_types, GINT_TO_POINTER(ptype), GINT_TO_POINTER(rtx_ptype));
+				g_list_free(rtx_ptypes);
+				rtx_ptypes = g_hash_table_get_values(stream->rtx_payload_types);
+				tempP = tempP->next;
+			}
+			g_list_free(ptypes);
+			g_list_free(rtx_ptypes);
+		}
+	}
+	/* Enrich the SDP the plugin gave us with all the WebRTC related stuff */
 	char *sdp_merged = janus_sdp_merge(ice_handle, parsed_sdp, offer ? TRUE : FALSE);
 	if(sdp_merged == NULL) {
 		/* Couldn't merge SDP */
@@ -2886,6 +3023,14 @@ void janus_plugin_notify_event(janus_plugin *plugin, janus_plugin_session *plugi
 	}
 }
 
+gboolean janus_plugin_auth_is_signature_valid(janus_plugin *plugin, const char *token) {
+	return janus_auth_check_signature(token, plugin->get_package());
+}
+
+gboolean janus_plugin_auth_signature_contains(janus_plugin *plugin, const char *token, const char *descriptor) {
+	return janus_auth_check_signature_contains(token, plugin->get_package(), descriptor);
+}
+
 
 /* Main */
 gint main(int argc, char *argv[])
@@ -2910,7 +3055,7 @@ gint main(int argc, char *argv[])
 	if(args_info.configs_folder_given) {
 		configs_folder = g_strdup(args_info.configs_folder_arg);
 	} else {
-		configs_folder = g_strdup (CONFDIR);
+		configs_folder = g_strdup(CONFDIR);
 	}
 	if(config_file == NULL) {
 		char file[255];
@@ -3134,6 +3279,9 @@ gint main(int argc, char *argv[])
 	if(args_info.token_auth_given) {
 		janus_config_add_item(config, "general", "token_auth", "yes");
 	}
+	if(args_info.token_auth_secret_given) {
+		janus_config_add_item(config, "general", "token_auth_secret", args_info.token_auth_secret_arg);
+	}
 	if(args_info.cert_pem_given) {
 		janus_config_add_item(config, "certificates", "cert_pem", args_info.cert_pem_arg);
 	}
@@ -3186,6 +3334,9 @@ gint main(int argc, char *argv[])
 		char nmt[20];
 		g_snprintf(nmt, 20, "%d", args_info.no_media_timer_arg);
 		janus_config_add_item(config, "media", "no_media_timer", nmt);
+	}
+	if(args_info.rfc_4588_given) {
+		janus_config_add_item(config, "media", "rfc_4588", "yes");
 	}
 	if(args_info.rtp_port_range_given) {
 		janus_config_add_item(config, "media", "rtp_port_range", args_info.rtp_port_range_arg);
@@ -3307,7 +3458,12 @@ gint main(int argc, char *argv[])
 	}
 	/* Also check if the token based authentication mechanism needs to be enabled */
 	item = janus_config_get_item_drilldown(config, "general", "token_auth");
-	janus_auth_init(item && item->value && janus_is_true(item->value));
+	gboolean auth_enabled = item && item->value && janus_is_true(item->value);
+	item = janus_config_get_item_drilldown(config, "general", "token_auth_secret");
+	const char *auth_secret = NULL;
+	if (item && item->value)
+		auth_secret = item->value;
+	janus_auth_init(auth_enabled, auth_secret);
 
 	/* Initialize the recorder code */
 	item = janus_config_get_item_drilldown(config, "general", "recordings_tmp_ext");
@@ -3484,6 +3640,11 @@ gint main(int argc, char *argv[])
 			janus_set_no_media_timer(nmt);
 		}
 	}
+	/* RFC4588 support */
+	item = janus_config_get_item_drilldown(config, "media", "rfc_4588");
+	if(item && item->value) {
+		janus_set_rfc4588_enabled(janus_is_true(item->value));
+	}
 
 	/* Setup OpenSSL stuff */
 	const char* server_pem;
@@ -3536,6 +3697,23 @@ gint main(int argc, char *argv[])
 		JANUS_LOG(LOG_FATAL, "Got error %d (%s) trying to start sessions timeout watchdog...\n", error->code, error->message ? error->message : "??");
 		exit(1);
 	}
+	/* Start the thread that will dispatch incoming requests */
+	requests = g_async_queue_new_full((GDestroyNotify) janus_request_destroy);
+	GThread *requests_thread = g_thread_try_new("sessions requests", &janus_transport_requests, NULL, &error);
+	if(error != NULL) {
+		JANUS_LOG(LOG_FATAL, "Got error %d (%s) trying to start requests thread...\n", error->code, error->message ? error->message : "??");
+		exit(1);
+	}
+	/* Create a thread pool to handle asynchronous requests, no matter what the transport */
+	error = NULL;
+	tasks = g_thread_pool_new(janus_transport_task, NULL, -1, FALSE, &error);
+	if(error != NULL) {
+		/* Something went wrong... */
+		JANUS_LOG(LOG_FATAL, "Got error %d (%s) trying to launch the request pool task thread...\n", error->code, error->message ? error->message : "??");
+		exit(1);
+	}
+	/* Wait 120 seconds before stopping idle threads to avoid the creation of too many threads for AddressSanitizer. */
+	g_thread_pool_set_max_idle_time(120 * 1000);
 
 	/* Load event handlers */
 	const char *path = NULL;
@@ -3807,17 +3985,6 @@ gint main(int argc, char *argv[])
 		g_strfreev(disabled_plugins);
 	disabled_plugins = NULL;
 
-	/* Create a thread pool to handle incoming requests, no matter what the transport */
-	error = NULL;
-	tasks = g_thread_pool_new(janus_transport_task, NULL, -1, FALSE, &error);
-	if(error != NULL) {
-		/* Something went wrong... */
-		JANUS_LOG(LOG_FATAL, "Got error %d (%s) trying to launch the request pool task thread...\n", error->code, error->message ? error->message : "??");
-		exit(1);
-	}
-	/* Wait 120 seconds before stopping idle threads to avoid the creation of too many threads for AddressSanitizer. */
-	g_thread_pool_set_max_idle_time(120 * 1000);
-
 	/* Load transports */
 	gboolean janus_api_enabled = FALSE, admin_api_enabled = FALSE;
 	path = TRANSPORTDIR;
@@ -3937,8 +4104,8 @@ gint main(int argc, char *argv[])
 		exit(1);	/* FIXME Should we really give up? */
 	}
 	/* Make sure at least an admin API transport is available, if the auth mechanism is enabled */
-	if(!admin_api_enabled && janus_auth_is_enabled()) {
-		JANUS_LOG(LOG_FATAL, "No Admin/monitor transport is available, but the token based authentication mechanism is enabled... this will cause all requests to fail, giving up! If you want to use tokens, enable the Admin/monitor API and restart Janus\n");
+	if(!admin_api_enabled && janus_auth_is_stored_mode()) {
+		JANUS_LOG(LOG_FATAL, "No Admin/monitor transport is available, but the stored token based authentication mechanism is enabled... this will cause all requests to fail, giving up! If you want to use tokens, enable the Admin/monitor API or set the token auth secret.\n");
 		exit(1);	/* FIXME Should we really give up? */
 	}
 
@@ -3993,7 +4160,13 @@ gint main(int argc, char *argv[])
 		g_hash_table_foreach(transports_so, janus_transportso_close, NULL);
 		g_hash_table_destroy(transports_so);
 	}
+	/* Get rid of requests tasks and thread too */
 	g_thread_pool_free(tasks, FALSE, FALSE);
+	JANUS_LOG(LOG_INFO, "Ending requests thread...\n");
+	g_async_queue_push(requests, &exit_message);
+	g_thread_join(requests_thread);
+	requests_thread = NULL;
+	g_async_queue_unref(requests);
 
 	JANUS_LOG(LOG_INFO, "Destroying sessions...\n");
 	g_clear_pointer(&sessions, g_hash_table_destroy);

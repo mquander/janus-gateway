@@ -1352,15 +1352,35 @@ function Janus(gatewayCallbacks) {
 			// We only need to update the existing stream
 			if(((!media.update && isAudioSendEnabled(media)) || (media.update && (media.addAudio || media.replaceAudio))) &&
 					stream.getAudioTracks() && stream.getAudioTracks().length) {
-				Janus.log("Adding audio track:", stream.getAudioTracks()[0]);
 				config.myStream.addTrack(stream.getAudioTracks()[0]);
-				config.pc.addTrack(stream.getAudioTracks()[0], stream);
+				if(media.replaceAudio && Janus.webRTCAdapter.browserDetails.browser === "firefox") {
+					Janus.log("Adding audio track:", stream.getAudioTracks()[0]);
+					for(var index in config.pc.getSenders()) {
+						var s = config.pc.getSenders()[index];
+						if(s && s.track && s.track.kind === "audio") {
+							s.replaceTrack(stream.getAudioTracks()[0]);
+						}
+					}
+				} else {
+					Janus.log((media.replaceAudio ? "Replacing" : "Adding") + " audio track:", stream.getAudioTracks()[0]);
+					config.pc.addTrack(stream.getAudioTracks()[0], stream);
+				}
 			}
 			if(((!media.update && isVideoSendEnabled(media)) || (media.update && (media.addVideo || media.replaceVideo))) &&
 					stream.getVideoTracks() && stream.getVideoTracks().length) {
-				Janus.log("Adding video track:", stream.getVideoTracks()[0]);
 				config.myStream.addTrack(stream.getVideoTracks()[0]);
-				config.pc.addTrack(stream.getVideoTracks()[0], stream);
+				if(media.replaceVideo && Janus.webRTCAdapter.browserDetails.browser === "firefox") {
+					Janus.log("Replacing video track:", stream.getVideoTracks()[0]);
+					for(var index in config.pc.getSenders()) {
+						var s = config.pc.getSenders()[index];
+						if(s && s.track && s.track.kind === "video") {
+							s.replaceTrack(stream.getVideoTracks()[0]);
+						}
+					}
+				} else {
+					Janus.log((media.replaceVideo ? "Replacing" : "Adding") + " video track:", stream.getVideoTracks()[0]);
+					config.pc.addTrack(stream.getVideoTracks()[0], stream);
+				}
 			}
 		}
 		// If we still need to create a PeerConnection, let's do that
@@ -1638,11 +1658,18 @@ function Janus(gatewayCallbacks) {
 					} catch(e) {};
 				}
 				if(config.pc.getSenders() && config.pc.getSenders().length) {
-					for(var index in config.pc.getSenders()) {
-						var s = config.pc.getSenders()[index];
-						if(s && s.track && s.track.kind === "audio") {
-							Janus.log("Removing audio sender:", s);
-							config.pc.removeTrack(s);
+					var ra = true;
+					if(media.replaceAudio && Janus.webRTCAdapter.browserDetails.browser === "firefox") {
+						// On Firefox we can use replaceTrack
+						ra = false;
+					}
+					if(ra) {
+						for(var index in config.pc.getSenders()) {
+							var s = config.pc.getSenders()[index];
+							if(s && s.track && s.track.kind === "audio") {
+								Janus.log("Removing audio sender:", s);
+								config.pc.removeTrack(s);
+							}
 						}
 					}
 				}
@@ -1657,11 +1684,18 @@ function Janus(gatewayCallbacks) {
 					} catch(e) {};
 				}
 				if(config.pc.getSenders() && config.pc.getSenders().length) {
-					for(var index in config.pc.getSenders()) {
-						var s = config.pc.getSenders()[index];
-						if(s && s.track && s.track.kind === "video") {
-							Janus.log("Removing video sender:", s);
-							config.pc.removeTrack(s);
+					var rv = true;
+					if(media.replaceVideo && Janus.webRTCAdapter.browserDetails.browser === "firefox") {
+						// On Firefox we can use replaceTrack
+						rv = false;
+					}
+					if(rv) {
+						for(var index in config.pc.getSenders()) {
+							var s = config.pc.getSenders()[index];
+							if(s && s.track && s.track.kind === "video") {
+								Janus.log("Removing video sender:", s);
+								config.pc.removeTrack(s);
+							}
 						}
 					}
 				}
@@ -2430,7 +2464,7 @@ function Janus(gatewayCallbacks) {
 					Janus.httpAPICall(server + "/" + sessionId + "/" + handleId, {
 						verb: 'POST',
 						withCredentials: withCredentials,
-						data: request
+						body: request
 					});
 				}
 			}
@@ -2487,7 +2521,7 @@ function Janus(gatewayCallbacks) {
 		// (based on https://gist.github.com/ggarber/a19b4c33510028b9c657)
 		var lines = sdp.split("\r\n");
 		var video = false;
-		var ssrc = [ -1 ], ssrc_fid = -1;
+		var ssrc = [ -1 ], ssrc_fid = [ -1 ];
 		var cname = null, msid = null, mslabel = null, label = null;
 		var insertAt = -1;
 		for(var i=0; i<lines.length; i++) {
@@ -2518,7 +2552,7 @@ function Janus(gatewayCallbacks) {
 			var fid = lines[i].match(/a=ssrc-group:FID (\d+) (\d+)/);
 			if(fid) {
 				ssrc[0] = fid[1];
-				ssrc_fid = fid[2];
+				ssrc_fid[0] = fid[2];
 				lines.splice(i, 1); i--;
 				continue;
 			}
@@ -2606,7 +2640,7 @@ function Janus(gatewayCallbacks) {
 					if(match) {
 						label = match[1];
 					}
-					if(lines[i].indexOf('a=ssrc:' + ssrc_fid) === 0) {
+					if(lines[i].indexOf('a=ssrc:' + ssrc_fid[0]) === 0) {
 						lines.splice(i, 1); i--;
 						continue;
 					}
@@ -2630,9 +2664,12 @@ function Janus(gatewayCallbacks) {
 			// Append at the end
 			insertAt = lines.length;
 		}
-		// Generate a couple of SSRCs
+		// Generate a couple of SSRCs (for retransmissions too)
+		// Note: should we check if there are conflicts, here?
 		ssrc[1] = Math.floor(Math.random()*0xFFFFFFFF);
 		ssrc[2] = Math.floor(Math.random()*0xFFFFFFFF);
+		ssrc_fid[1] = Math.floor(Math.random()*0xFFFFFFFF);
+		ssrc_fid[2] = Math.floor(Math.random()*0xFFFFFFFF);
 		// Add attributes to the SDP
 		for(var i=0; i<ssrc.length; i++) {
 			if(cname) {
@@ -2651,7 +2688,27 @@ function Janus(gatewayCallbacks) {
 				lines.splice(insertAt, 0, 'a=ssrc:' + ssrc[i] + ' label:' + label);
 				insertAt++;
 			}
+			// Add the same info for the retransmission SSRC
+			if(cname) {
+				lines.splice(insertAt, 0, 'a=ssrc:' + ssrc_fid[i] + ' cname:' + cname);
+				insertAt++;
+			}
+			if(msid) {
+				lines.splice(insertAt, 0, 'a=ssrc:' + ssrc_fid[i] + ' msid:' + msid);
+				insertAt++;
+			}
+			if(mslabel) {
+				lines.splice(insertAt, 0, 'a=ssrc:' + ssrc_fid[i] + ' mslabel:' + mslabel);
+				insertAt++;
+			}
+			if(label) {
+				lines.splice(insertAt, 0, 'a=ssrc:' + ssrc_fid[i] + ' label:' + label);
+				insertAt++;
+			}
 		}
+		lines.splice(insertAt, 0, 'a=ssrc-group:FID ' + ssrc[2] + ' ' + ssrc_fid[2]);
+		lines.splice(insertAt, 0, 'a=ssrc-group:FID ' + ssrc[1] + ' ' + ssrc_fid[1]);
+		lines.splice(insertAt, 0, 'a=ssrc-group:FID ' + ssrc[0] + ' ' + ssrc_fid[0]);
 		lines.splice(insertAt, 0, 'a=ssrc-group:SIM ' + ssrc[0] + ' ' + ssrc[1] + ' ' + ssrc[2]);
 		sdp = lines.join("\r\n");
 		if(!sdp.endsWith("\r\n"))
