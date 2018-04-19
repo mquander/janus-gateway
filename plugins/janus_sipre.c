@@ -33,7 +33,10 @@
  * communication at any time, either to hangup (BYE) an ongoing call or
  * to cancel/decline (CANCEL/BYE) a call that hasn't started yet.
  *
- * Actual API docs: TBD.
+ * Actual API docs: TBD. For the time being, refer to the Sofia SIP plugin
+ * documentation, as while some of the features listed there may not be
+ * available in the SIPre plugin as of now, all of the messages are supposed
+ * to be formatted exactly the same way.
  *
  * \ingroup plugins
  * \ref plugins
@@ -3842,7 +3845,7 @@ int janus_sipre_cb_answer(const struct sip_msg *msg, void *arg) {
 		JANUS_LOG(LOG_WARN, "This is an update to an existing call (possibly in response to hold/unhold)\n");
 		return 0;
 	}
-	if(!session->media.earlymedia && !session->media.earlymedia) {
+	if(!session->media.earlymedia && !session->media.update) {
 		GError *error = NULL;
 		char tname[16];
 		g_snprintf(tname, sizeof(tname), "siprertp %s", session->account.username);

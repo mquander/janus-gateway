@@ -47,6 +47,9 @@ DTLS certificate
 .BR \-k ", " \-\-cert-key=\fIfilename\fR
 DTLS certificate key
 .TP
+.BR \-K ", " \-\-cert-pwd=\fItext\fR
+DTLS certificate key passphrase (if needed)
+.TP
 .BR \-S ", " \-\-stun-server=\fIip:port\fR
 STUN server(:port) to use, if needed (e.g., gateway behind NAT, default=none)
 .TP
@@ -91,6 +94,9 @@ Public name of this Janus instance (default=MyJanusInstance)
 .TP
 .BR \-s ", " \-\-session-timeout=\fInumber\fR
 Session timeout value, in seconds (default=60)
+.TP
+.BR \-m ", " \-\-reclaim-session-timeout=\fInumber\fR
+Reclaim session timeout value, in seconds (default=0)
 .TP
 .BR \-d ", " \-\-debug-level=\fI1\-7\fR
 Debug/logging level (0=disable debugging, 7=maximum debug level; default=4)

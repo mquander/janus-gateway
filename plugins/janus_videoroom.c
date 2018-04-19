@@ -12,7 +12,7 @@
  * different scenarios, ranging from a simple webinar (one speaker, several
  * watchers) to a fully meshed video conference (each peer sending and
  * receiving to and from all the others).
- * 
+ *
  * Considering that this plugin allows for several different WebRTC PeerConnections
  * to be on at the same time for the same peer (specifically, each peer
  * potentially has 1 PeerConnection on for publishing and N on for subscriptions
@@ -27,21 +27,21 @@
  * to unmute in the room, as its only purpose would be to provide a
  * context in which creating the recvonly PeerConnection for the
  * subscription to an active publisher participant.
- * 
+ *
  * \note Work is going on to implement SSRC multiplexing (Unified Plan),
  * meaning that in the future you'll be able to use the same
  * Janus handle/VideoRoom subscriber/PeerConnection to receive multiple
  * publishers at the same time.
- * 
+ *
  * Rooms to make available are listed in the plugin configuration file.
  * A pre-filled configuration file is provided in \c conf/janus.plugin.videoroom.cfg
  * and includes a demo room for testing. The same plugin is also used
  * dynamically (that is, with rooms created on the fly via API) in the
  * Screen Sharing demo as well.
- * 
+ *
  * To add more rooms or modify the existing one, you can use the following
  * syntax:
- * 
+ *
  * \verbatim
 [<unique room ID>]
 description = This is my awesome room
@@ -83,12 +83,12 @@ notify_joining = true|false (optional, whether to notify all participants when a
  * Note that recording will work with all codecs except iSAC.
  *
  * \section sfuapi Video Room API
- * 
+ *
  * The Video Room API supports several requests, some of which are
  * synchronous and some asynchronous. There are some situations, though,
  * (invalid JSON, invalid request) which will always result in a
  * synchronous error response even for asynchronous requests. 
- * 
+ *
  * \c create , \c destroy , \c edit , \c exists, \c list, \c allowed, \c kick and
  * and \c listparticipants are synchronous requests, which means you'll
  * get a response directly within the context of the transaction.
@@ -100,9 +100,9 @@ notify_joining = true|false (optional, whether to notify all participants when a
  * exists; finally, \c list lists all the available rooms, while \c
  * listparticipants lists all the active (as in currentòy publishing
  * something) participants of a specific room and their details.
- * 
+ *
  * The \c join , \c joinandconfigure , \c configure , \c publish ,
- * \c unpublish , \c start , \c pause , \c switch , \c stop and \c leave
+ * \c unpublish , \c start , \c pause , \c switch and \c leave
  * requests instead are all asynchronous, which
  * means you'll get a notification about their success or failure in
  * an event. \c join allows you to join a specific video room, specifying
@@ -117,17 +117,883 @@ notify_joining = true|false (optional, whether to notify all participants when a
  * the \c switch request can be used to change the source of the media
  * flowing over a specific PeerConnection (e.g., I was watching Alice,
  * I want to watch Bob now) without having to create a new handle for
- * that; \c stop interrupts a viewer instance; finally, \c leave allows
- * you to leave a video room for good.
- * 
+ * that; \c finally, \c leave allows you to leave a video room for good
+ * (or, in the case of viewers, definitely closes a subscription).
+ *
+ * \c create can be used to create a new video room, and has to be
+ * formatted as follows:
+ *
+\verbatim
+{
+	"request" : "create",
+	"room" : <unique numeric ID, optional, chosen by plugin if missing>,
+	"permanent" : <true|false, whether the room should be saved in the config file, default false>,
+	"description" : "<pretty name of the room, optional>",
+	"secret" : "<password required to edit/destroy the room, optional>",
+	"pin" : "<password required to join the room, optional>",
+	"is_private" : <true|false, whether the room should appear in a list request>,
+	"allowed" : [ array of string tokens users can use to join this room, optional],
+	...
+}
+\endverbatim
+ *
+ * For the sake of brevity, not all of the available settings are listed
+ * here. You can refer to the name of the properties in the configuration
+ * file as a reference, as the ones used to programmatically create a new
+ * room are exactly the same.
+ *
+ * A successful creation procedure will result in a \c created response:
+ *
+\verbatim
+{
+	"videoroom" : "created",
+	"room" : <unique numeric ID>,
+	"permanent" : <true if saved to config file, false if not>
+}
+\endverbatim
+ *
+ * If you requested a permanent room but a \c false value is returned
+ * instead, good chances are that there are permission problems.
+ *
+ * An error instead (and the same applies to all other requests, so this
+ * won't be repeated) would provide both an error code and a more verbose
+ * description of the cause of the issue:
+ *
+\verbatim
+{
+	"videoroom" : "event",
+	"error_code" : <numeric ID, check Macros below>,
+	"error" : "<error description as a string>"
+}
+\endverbatim
+ *
  * Notice that, in general, all users can create rooms. If you want to
  * limit this functionality, you can configure an admin \c admin_key in
  * the plugin settings. When configured, only "create" requests that
  * include the correct \c admin_key value in an "admin_key" property
  * will succeed, and will be rejected otherwise.
+ *
+ * Once a room has been created, you can still edit some (but not all)
+ * of its properties using the \c edit request. This allows you to modify
+ * the room description, secret, pin and whether it's private or not: you
+ * won't be able to modify other more static properties, like the room ID,
+ * the sampling rate, the extensions-related stuff and so on. If you're
+ * interested in changing the ACL, instead, check the \c allowed message.
+ * An \c edit request has to be formatted as follows:
+ *
+\verbatim
+{
+	"request" : "edit",
+	"room" : <unique numeric ID of the room to edit>,
+	"secret" : "<room secret, mandatory if configured>",
+	"new_description" : "<new pretty name of the room, optional>",
+	"new_secret" : "<new password required to edit/destroy the room, optional>",
+	"new_pin" : "<new password required to join the room, optional>",
+	"new_is_private" : <true|false, whether the room should appear in a list request>,
+	"new_require_pvtid" : <true|false, whether the room should require private_id from subscribers>,
+	"new_bitrate" : <new bitrate cap to force on all publishers (except those with custom overrides)>,
+	"new_fir_freq" : <new period for regular PLI keyframe requests to publishers>,
+	"new_publishers" : <new cap on the number of concurrent active WebRTC publishers>,
+	"permanent" : <true|false, whether the room should be also removed from the config file, default false>
+}
+\endverbatim
+ *
+ * A successful edit procedure will result in an \c edited response:
+ *
+\verbatim
+{
+	"videoroom" : "edited",
+	"room" : <unique numeric ID>
+}
+\endverbatim
+ *
+ * On the other hand, \c destroy can be used to destroy an existing video
+ * room, whether created dynamically or statically, and has to be
+ * formatted as follows:
+ *
+\verbatim
+{
+	"request" : "destroy",
+	"room" : <unique numeric ID of the room to destroy>,
+	"secret" : "<room secret, mandatory if configured>",
+	"permanent" : <true|false, whether the room should be also removed from the config file, default false>
+}
+\endverbatim
+ *
+ * A successful destruction procedure will result in a \c destroyed response:
+ *
+\verbatim
+{
+	"videoroom" : "destroyed",
+	"room" : <unique numeric ID>
+}
+\endverbatim
+ *
+ * This will also result in a \c destroyed event being sent to all the
+ * participants in the video room, which will look like this:
+ *
+\verbatim
+{
+	"videoroom" : "destroyed",
+	"room" : <unique numeric ID of the destroyed room>
+}
+\endverbatim
+ *
+ * You can check whether a room exists using the \c exists request,
+ * which has to be formatted as follows:
+ *
+\verbatim
+{
+	"request" : "exists",
+	"room" : <unique numeric ID of the room to check>
+}
+\endverbatim
+ *
+ * A successful request will result in a \c success response:
+ *
+\verbatim
+{
+	"videoroom" : "success",
+	"room" : <unique numeric ID>,
+	"exists" : <true|false>
+}
+\endverbatim
+ *
+ * You can configure whether to check tokens or add/remove people who can join
+ * a room using the \c allowed request, which has to be formatted as follows:
+ *
+\verbatim
+{
+	"request" : "allowed",
+	"secret" : "<room secret, mandatory if configured>",
+	"action" : "enable|disable|add|remove",
+	"room" : <unique numeric ID of the room to update>,
+	"allowed" : [
+		// Array of strings (tokens users might pass in "join", only for add|remove)
+	]
+}
+\endverbatim
+ *
+ * A successful request will result in a \c success response:
+ *
+\verbatim
+{
+	"videoroom" : "success",
+	"room" : <unique numeric ID>,
+	"allowed" : [
+		// Updated, complete, list of allowed tokens (only for enable|add|remove)
+	]
+}
+\endverbatim
+ *
+ * If you're the administrator of a room (that is, you created it and have access
+ * to the secret) you can kick participants using the \c kick request. Notice
+ * that this only kicks the user out of the room, but does not prevent them from
+ * re-joining: to ban them, you need to first remove them from the list of
+ * authorized users (see \c allowed request) and then \c kick them. The \c kick
+ * request has to be formatted as follows:
+ *
+\verbatim
+{
+	"request" : "kick",
+	"secret" : "<room secret, mandatory if configured>",
+	"room" : <unique numeric ID of the room>,
+	"id" : <unique numeric ID of the participant to kick>
+}
+\endverbatim
+ *
+ * A successful request will result in a \c success response:
+ *
+\verbatim
+{
+	"videoroom" : "success",
+}
+\endverbatim
+ *
+ * To get a list of the available rooms (excluded those configured or
+ * created as private rooms) you can make use of the \c list request,
+ * which has to be formatted as follows:
+ *
+\verbatim
+{
+	"request" : "list"
+}
+\endverbatim
+ *
+ * A successful request will produce a list of rooms in a \c success response:
+ *
+\verbatim
+{
+	"videoroom" : "success",
+	"rooms" : [		// Array of room objects
+		{	// Room #1
+			"room" : <unique numeric ID>,
+			"description" : "<Name of the room>",
+			"pin_required" : <true|false, whether a PIN is required to join this room>,
+			"max_publishers" : <how many publishers can actually publish via WebRTC at the same time>,
+			"bitrate" : <bitrate cap that should be forced (via REMB) on all publishers by default>,
+			"fir_freq" : <how often a keyframe request is sent via PLI/FIR to active publishers>,
+			"audiocodec" : "<comma separated list of allowed audio codecs>",
+			"videocodec" : "<comma separated list of allowed video codecs>",
+			"record" : <true|false, whether the room is being recorded>,
+			"record_dir" : "<if recording, the path where the .mjr files are being saved>",
+			"num_participants" : <count of the participants (publishers, active or not; not subscribers)>
+		},
+		// Other rooms
+	]
+}
+\endverbatim
+ *
+ * To get a list of the participants in a specific room, instead, you
+ * can make use of the \c listparticipants request, which has to be
+ * formatted as follows:
+ *
+\verbatim
+{
+	"request" : "listparticipants",
+	"room" : <unique numeric ID of the room>
+}
+\endverbatim
+ *
+ * A successful request will produce a list of participants in a
+ * \c participants response:
+ *
+\verbatim
+{
+	"videoroom" : "participants",
+	"room" : <unique numeric ID of the room>,
+	"participants" : [		// Array of participant objects
+		{	// Participant #1
+			"id" : <unique numeric ID of the participant>,
+			"display" : "<display name of the participant, if any; optional>",
+			"talking" : <true|false, whether user is talking or not (only if audio levels are used)>,
+			"internal_audio_ssrc" : <audio SSRC used internally for this active publisher>,
+			"internal_video_ssrc" : <video SSRC used internally for this active publisher>
+		},
+		// Other participants
+	]
+}
+\endverbatim
+ *
+ * This covers almost all the synchronous requests. All the asynchronous requests,
+ * plus a couple of additional synchronous requests we'll cover later, refer
+ * to participants instead, namely on how they can publish, subscribe, or
+ * more in general manage the media streams they may be sending or receiving.
+ *
+ * Considering the different nature of publishers and subscribers in the room,
+ * and more importantly how you establish PeerConnections in the respective
+ * cases, their API requests are addressed in separate subsections.
+ *
+ * \subsection vroompub VideoRoom Publishers
+ *
+ * In a VideoRoom, publishers are those participant handles that are able
+ * (although may choose not to, more on this later) publish media in the
+ * room, and as such become feeds that you can subscribe to.
+ *
+ * To specify a handle will be associated with a publisher, you must use
+ * the \c join request with \c ptype set to \c publisher (note that, as it
+ * will be explained later, you can also use \c joinandconfigure for the
+ * purpose). The exact syntax of the request is the following:
+ *
+\verbatim
+{
+	"request" : "join",
+	"ptype" : "publisher",
+	"room" : <unique ID of the room to join>,
+	"id" : <unique ID to register for the publisher; optional, will be chosen by the plugin if missing>,
+	"display" : "<display name for the publisher; optional>",
+	"token" : "<invitation token, in case the room has an ACL; optional>"
+}
+\endverbatim
+ *
+ * This will add the user to the list of participants in the room, although
+ * in a non-active role for the time being. Anyway, this participation
+ * allows the user to receive notifications about several aspects of the
+ * room on the related handle (including streams as they become available
+ * and go away). As such, it can be used even just as a way to get
+ * notifications in a room, without the need of ever actually publishing
+ * any stream at all (which explains why the "publisher" role may actually
+ * be a bit confusing in this context). 
+ *
+ * A successful \c join will result in a \c joined event, which will contain
+ * a list of the currently active (as in publishing via WebRTC) publishers:
+ *
+\verbatim
+{
+	"videoroom" : "joined",
+	"room" : <room ID>,
+	"description" : <description of the room, if available>,
+	"id" : <unique ID of the participant>,
+	"private_id" : <a different unique ID associated to the participant; meant to be private>,
+	"publishers" : [
+		{
+			"id" : <unique ID of active publisher #1>,
+			"display" : "<display name of active publisher #1, if any>",
+			"audio_codec" : "<audio codec used by active publisher #1, if any>",
+			"video_codec" : "<video codec used by active publisher #1, if any>",
+			"talking" : <true|false, whether the publisher is talking or not (only if audio levels are used)>,
+		},
+		// Other active publishers
+	]
+}
+\endverbatim
+ *
+ * Notice that the publishers list will of course be empty if no one is
+ * currently active in the room. For what concerns the \c private_id
+ * property, it is meant to be used by the user when they create subscriptions,
+ * so that the plugin can associate subscriber handles (which are typically
+ * anonymous) to a specific participant; they're usually optional, unless
+ * required by the room configuration.
+ *
+ * As explained, with a simple \c join you're not an active publisher (there
+ * is no WebRTC PeerConnection yet), which means that by default your presence
+ * is not notified to other participants. In fact, the publish/subscribe nature
+ * of the plugin implies that by default only active publishers are notified,
+ * to allow participants to subscribe to existing feeds: notifying all joins/leaves,
+ * even those related to who will just lurk, may be overly verbose and chatty,
+ * especially in large rooms. Anyway, rooms can be configured to notify those
+ * as well, if the \c notify_joining property is set to true: in that case,
+ * regular joins will be notified too, in an event formatted like this:
+ *
+\verbatim
+{
+	"videoroom" : "event",
+	"room" : <room ID>,
+	"joining" : {
+		"id" : <unique ID of the new participant>,
+		"display" : "<display name of the new participant, if any>"
+	}
+}
+\endverbatim
+ *
+ * If you're interested in publishing media within a room, you can do that
+ * with a \c publish request. This request MUST be accompanied by a JSEP
+ * SDP offer to negotiate a new PeerConnection. The plugin will match it
+ * to the room configuration (e.g., to make sure the codecs you negotiated
+ * are allowed in the room), and will reply with a JSEP SDP answer to
+ * close the circle and complete the setup of the PeerConnection. As soon
+ * as the PeerConnection has been establisher, the publisher will become
+ * active, and a new active feed other participants can subscribe to.
+ *
+ * The syntax of a \c publish request is the following:
+ *
+\verbatim
+{
+	"request" : "publish",
+	"audio" : <true|false, depending on whether or not audio should be relayed; true by default>,
+	"video" : <true|false, depending on whether or not video should be relayed; true by default>,
+	"data" : <true|false, depending on whether or not data should be relayed; true by default>,
+	"audiocodec" : "<audio codec to prefer among the negotiated ones; optional>",
+	"videocodec" : "<video codec to prefer among the negotiated ones; optional>",
+	"bitrate" : <bitrate cap to return via REMB; optional, overrides the global room value if present>,
+	"record" : <true|false, whether this publisher should be recorded or not; optional>,
+	"filename" : "<if recording, the base path/file to use for the recording files; optional>",
+	"display" : "<new display name to use in the room; optional>"
+}
+\endverbatim
+ *
+ * As anticipated, since this is supposed to be accompanied by a JSEP SDP
+ * offer describing the publisher's media streams, the plugin will negotiate
+ * and prepare a matching JSEP SDP answer. If successful, a \c configured
+ * event will be sent back, formatted like this:
+ *
+\verbatim
+{
+	"videoroom" : "event",
+	"configured" : "ok"
+}
+\endverbatim
  * 
- * Actual API docs: TBD.
+ * This event will be accompanied by the prepared JSEP SDP answer.
+ *
+ * Notice that you can also use \c configure as a request instead of
+ * \c publish to start publishing. The two are functionally equivalent
+ * for publishing, but from a semantic perspective \c publish is the
+ * right message to send when publishing. The \c configure request, as
+ * it will be clearer later, can also be used to update some properties
+ * of the publisher session: in this case the \c publish request can NOT
+ * be used, as it can only be invoked to publish, and will fail if you're
+ * already publishing something.
+ *
+ * As an additional note, notice that you can also join and publish in
+ * a single request, which is useful in case you're not interested in
+ * first join as a passive attendee and only later publish something,
+ * but want to publish something right away. In this case you can use
+ * the \c joinandconfigure request, which as you can imagine combines
+ * the properties of both \c join and \c publish in a single request:
+ * the response to a \c joinandconfigure will be a \c joined event, and
+ * will again be accompanied by a JSEP SDP answer as usual.
+ *
+ * However you decided to publish something, as soon as the PeerConnection
+ * setup succeeds and the publisher becomes active, an event is sent to
+ * all the participants in the room with information on the new feed.
+ * The event must contain an array with a single element, and be formatted like this:
+ *
+\verbatim
+{
+	"videoroom" : "event",
+	"room" : <room ID>,
+	"publishers" : [
+		{
+			"id" : <unique ID of the new publisher>,
+			"display" : "<display name of the new publisher, if any>",
+			"audio_codec" : "<audio codec used the new publisher, if any>",
+			"video_codec" : "<video codec used by the new publisher, if any>",
+			"talking" : <true|false, whether the publisher is talking or not (only if audio levels are used)>,
+		}
+	]
+}
+\endverbatim
  * 
+ * To stop publishing and tear down the related PeerConnection, you can
+ * use the \c unpublish request, which requires no arguments as the context
+ * is implicit:
+ *
+\verbatim
+{
+	"request" : "unpublish"
+}
+\endverbatim
+ *
+ * This will have the plugin tear down the PeerConnection, and remove the
+ * publisher from the list of active streams. If successful, the response
+ * will look like this:
+ *
+\verbatim
+{
+	"videoroom" : "event",
+	"unpublished" : "ok"
+}
+\endverbatim
+ *
+ * As soon as the PeerConnection is gone, all the other participants will
+ * also be notified about the fact that the stream is no longer available: 
+ *
+\verbatim
+{
+	"videoroom" : "event",
+	"room" : <room ID>,
+	"unpublished" : <unique ID of the publisher who unpublished>
+}
+\endverbatim
+ *
+ * Notice that the same event will also be sent whenever the publisher
+ * feed disappears for reasons other than an explicit \c unpublish , e.g.,
+ * because the handle was closed or the user lost their connection.
+ * Besides, notice that you can publish and unpublish multiple times
+ * within the context of the same publisher handle.
+ *
+ * As anticipated above, you can use a request called \c configure to
+ * tweak some of the properties of an active publisher session. This
+ * request must be formatted as follows:
+ *
+\verbatim
+{
+	"request" : "configure",
+	"audio" : <true|false, depending on whether or not audio should be relayed; true by default>,
+	"video" : <true|false, depending on whether or not video should be relayed; true by default>,
+	"data" : <true|false, depending on whether or not data should be relayed; true by default>,
+	"bitrate" : <bitrate cap to return via REMB; optional, overrides the global room value if present>,
+	"record" : <true|false, whether this publisher should be recorded or not; optional>,
+	"filename" : "<if recording, the base path/file to use for the recording files; optional>",
+	"display" : "<new display name to use in the room; optional>"
+}
+\endverbatim
+ *
+ * As you can see, it's basically the same properties as those listed for
+ * \c publish . This is why both requests can be used to start publishing,
+ * as even in that case you configure some of the settings. If successful,
+ * a \c configured event will be sent back as before, formatted like this:
+ *
+\verbatim
+{
+	"videoroom" : "event",
+	"configured" : "ok"
+}
+\endverbatim
+ *
+ * An interesting feature VideoRoom publisher can take advantage of is
+ * RTP forwarding. In fact, while the main purpose of this plugin is
+ * getting media from WebRTC sources (publishers) and relaying it to
+ * WebRTC destinations (subscribers), there are actually several use
+ * cases and scenarios for making this media available to external,
+ * notnecessarily WebRTC-compliant, components. These components may
+ * benefit from having access to the RTP media sent by a publisher, e.g.,
+ * for media processing, external recording, transcoding to other
+ * technologies via other applications, scalability purposes or
+ * whatever else makes sense in this context. This is made possible by
+ * a request called \c rtp_forward which, as the name suggests, simply
+ * forwards in real-time the media sent by a publisher via RTP (plain
+ * or encrypted) to a remote backend.
+ *
+ * You can add a new RTP forwarder for an existing publisher using the
+ * \c rtp_forward request, which has to be formatted as follows:
+ *
+\verbatim
+{
+	"request" : "rtp_forward",
+	"room" : <unique numeric ID of the room the publisher is in>,
+	"publisher_id" : <unique numeric ID of the publisher to relay externally>,
+	"host" : "<host address to forward the RTP and data packets to>",
+	"audio_port" : <port to forward the audio RTP packets to>,
+	"audio_ssrc" : <audio SSRC to use to use when streaming; optional>,
+	"audio_ptype" : <audio payload type to use when streaming; optional>,
+	"video_port" : <port to forward the video RTP packets to>,
+	"video_ssrc" : <video SSRC to use to use when streaming; optional>,
+	"video_ptype" : <video payload type to use when streaming; optional>,
+	"video_port_2" : <if simulcasting or doing VP9-SVC, port to forward the video RTP packets from the second substream/layer to>,
+	"video_ssrc_2" : <if simulcasting or doing VP9-SVC, video SSRC to use to use the second substream/layer; optional>,
+	"video_ptype_2" : <if simulcasting or doing VP9-SVC, video payload type to use the second substream/layer; optional>,
+	"video_port_3" : <if simulcasting or doing VP9-SVC, port to forward the video RTP packets from the third substream/layer to>,
+	"video_ssrc_3" : <if simulcasting or doing VP9-SVC, video SSRC to use to use the third substream/layer; optional>,
+	"video_ptype_3" : <if simulcasting or doing VP9-SVC, video payload type to use the third substream/layer; optional>,
+	"data_port" : <port to forward the datachannel messages to>,
+	"srtp_suite" : <length of authentication tag (32 or 80); optional>,
+	"srtp_crypto" : "<key to use as crypto (base64 encoded key as in SDES); optional>",
+	"always_on" : <true|false, whether silence should be forwarded when the room is empty>
+}
+\endverbatim
+ *
+ * A successful request will result in an \c rtp_forward response, containing
+ * the relevant info associated to the new forwarder(s):
+ *
+\verbatim
+{
+	"videoroom" : "rtp_forward",
+	"room" : <unique numeric ID, same as request>,
+	"publisher_id" : <unique numeric ID, same as request>,
+	"rtp_stream" : {
+		"audio" : <audio port, same as request if configured>,
+		"audio_stream_id" : <unique numeric ID assigned to the audio RTP forwarder, if any>,
+		"video" : <video port, same as request if configured>,
+		"video_stream_id" : <unique numeric ID assigned to the main video RTP forwarder, if any>,
+		"video_2" : <second video port, same as request if configured>,
+		"video_stream_id_2" : <unique numeric ID assigned to the second video RTP forwarder, if any>,
+		"video_3" : <third video port, same as request if configured>,
+		"video_stream_id_3" : <unique numeric ID assigned to the third video RTP forwarder, if any>,
+		"data" : <data port, same as request if configured>,
+		"data_stream_id" : <unique numeric ID assigned to datachannel messages forwarder, if any>
+	}
+}
+\endverbatim
+ *
+ * To stop a previously created RTP forwarder and stop it, you can use
+ * the \c stop_rtp_forward request, which has to be formatted as follows:
+ *
+\verbatim
+{
+	"request" : "stop_rtp_forward",
+	"room" : <unique numeric ID of the room the publisher is in>,
+	"publisher_id" : <unique numeric ID of the publisher to update>,
+	"stream_id" : <unique numeric ID of the RTP forwarder>
+}
+\endverbatim
+ *
+ * A successful request will result in a \c stop_rtp_forward response:
+ *
+\verbatim
+{
+	"videoroom" : "stop_rtp_forward",
+	"room" : <unique numeric ID, same as request>,
+	"publisher_id" : <unique numeric ID, same as request>,
+	"stream_id" : <unique numeric ID, same as request>
+}
+\endverbatim
+ *
+ * To get a list of all the forwarders in a specific room, instead, you
+ * can make use of the \c listforwarders request, which has to be
+ * formatted as follows:
+ *
+\verbatim
+{
+	"request" : "listforwarders",
+	"room" : <unique numeric ID of the room>,
+	"secret" : "<room secret; mandatory if configured>"
+}
+\endverbatim
+ *
+ * A successful request will produce a list of RTP forwarders in a
+ * \c forwarders response:
+ *
+\verbatim
+{
+	"videoroom" : "forwarders",
+	"room" : <unique numeric ID of the room>,
+	"rtp_forwarders" : [		// Array of publishers with RTP forwarders
+		{	// Publisher #1
+			"publisher_id" : <unique numeric ID of publisher #1>,
+			"rtp_forwarders" : [		// Array of RTP forwarders
+				{	// RTP forwarder #1
+					"audio_stream_id" : <unique numeric ID assigned to this audio RTP forwarder, if any>,
+					"video_stream_id" : <unique numeric ID assigned to this video RTP forwarder, if any>,
+					"data_stream_id" : <unique numeric ID assigned to this datachannel messages forwarder, if any>
+					"ip" : "<IP this forwarder is streaming to>",
+					"port" : <port this forwarder is streaming to>,
+					"ssrc" : <SSRC this forwarder is using, if any>,
+					"pt" : <payload type this forwarder is using, if any>,
+					"substream" : <video substream this video forwarder is relaying, if any>,
+					"srtp" : <true|false, whether the RTP stream is encrypted>
+				},
+				// Other forwarders for this publisher
+			],
+		},
+		// Other publishers
+	]
+}
+\endverbatim * 
+ * 
+ * To conclude, you can leave a room you previously joined as publisher
+ * using the \c leave request. This will also implicitly unpublish you
+ * if you were an active publisher in the room. The \c leave request
+ * looks like follows:
+ *
+\verbatim
+{
+	"request" : "leave"
+}
+\endverbatim
+ *
+ * If successful, the response will look like this:
+ *
+\verbatim
+{
+	"videoroom" : "event",
+	"leaving" : "ok"
+}
+\endverbatim
+ *
+ * Other participants will receive a different event depending on whether
+ * you were currently an active publisher ("unpublished") or simply
+ * lurking ("leaving"):
+ *
+\verbatim
+{
+	"videoroom" : "event",
+	"room" : <room ID>,
+	"leaving|unpublished" : <unique ID of the publisher who left>
+}
+\endverbatim
+ *
+ * \subsection vroomsub VideoRoom Subscribers
+ *
+ * In a VideoRoom, subscribers are NOT participants, but simply handles
+ * that will be used exclusively to receive media from a specific publisher
+ * in the room. Since they're not participants per se, they're basically
+ * streams that can be (and typically are) associated to publisher handles
+ * as the ones we introduced in the previous section, whether active or not.
+ * In fact, the typical use case is publishers being notified about new
+ * participants becoming active in the room, and as a result new subscriber
+ * sessions being created to receive their media streams; as soon as the
+ * publisher goes away, the subscriber handle is removed as well. As such,
+ * these subscriber sessions are dependent on feedback obtained by
+ * publishers, and can't exist on their own, unless you feed them the
+ * right info out of band.
+ *
+ * To specify a handle will be associated with a subscriber, you must use
+ * the \c join request with \c ptype set to \c subscriber and specify which
+ * feed to subscribe to. The exact syntax of the request is the following:
+ *
+\verbatim
+{
+	"request" : "join",
+	"ptype" : "subscriber",
+	"room" : <unique ID of the room to subscribe in>,
+	"feed" : <unique ID of the publisher to subscribe to; mandatory>,
+	"private_id" : <unique ID of the publisher that originated this request; optional, unless mandated by the room configuration>,
+	"close_pc" : <true|false, depending on whether or not the PeerConnection should be automatically closed when the publisher leaves; true by default>,
+	"audio" : <true|false, depending on whether or not audio should be relayed; true by default>,
+	"video" : <true|false, depending on whether or not video should be relayed; true by default>,
+	"data" : <true|false, depending on whether or not data should be relayed; true by default>,
+	"offer_audio" : <true|false; whether or not audio should be negotiated; true by default if the publisher has audio>,
+	"offer_video" : <true|false; whether or not video should be negotiated; true by default if the publisher has video>,
+	"offer_data" : <true|false; whether or not datachannels should be negotiated; true by default if the publisher has datachannels>
+}
+\endverbatim
+ *
+ * As you can see, it's just a matter of specifying the ID of the publisher to
+ * subscribe to and, if needed, your own \c private_id (if mandated by the room).
+ * The \c offer_audio , \c offer_video and \c offer_data are
+ * also particularly interesting, though, as they allow you to only subscribe
+ * to a subset of the mountpoint media. By default, in fact, this \c join
+ * request will result in the plugin preparing a new SDP offer trying to
+ * negotiate all the media streams made available by the publisher; in case
+ * the subscriber knows they don't support one of the mountpoint codecs, though
+ * (e.g., the video in the mountpoint is VP8, but they only support H.264),
+ * or are not interested in getting all the media (e.g., they're ok with
+ * just audio and not video, or don't have enough bandwidth for both),
+ * they can use those properties to shape the SDP offer to their needs.
+ *
+ * As anticipated, if successful this request will generate a new JSEP SDP
+ * offer, which will accompany an \c attached event:
+ *
+\verbatim
+{
+	"videoroom" : "attached",
+	"room" : <room ID>,
+	"feed" : <publisher ID>,
+	"display" : "<the display name of the publisher, if any>"
+}
+\endverbatim
+ *
+ * At this stage, to complete the setup of the PeerConnection the subscriber is
+ * supposed to send a JSEP SDP answer back to the plugin. This is done
+ * by means of a \c start request, which in this case MUST be associated
+ * with a JSEP SDP answer but otherwise requires no arguments:
+ *
+\verbatim
+{
+	"request" : "start"
+}
+\endverbatim
+ *
+ * If successful this request returns a \c started event:
+ *
+\verbatim
+{
+	"videoroom" : "event",
+	"started" : "ok"
+}
+\endverbatim
+ *
+ * Once this is done, all that's needed is waiting for the WebRTC PeerConnection
+ * establishment to succeed. As soon as that happens, the Streaming plugin
+ * can start relaying media from the mountpoint the viewer subscribed to
+ * to the viewer themselves.
+ *
+ * Notice that the same exact steps we just went through (\c watch request,
+ * followed by JSEP offer by the plugin, followed by \c start request with
+ * JSEP answer by the viewer) is what you also use when renegotiations are
+ * needed, e.g., for the purpose of ICE restarts.
+ *
+ * As a subscriber, you can temporarily pause and resume the whole media delivery
+ * with a \c pause and, again, \c start request (in this case without any JSEP
+ * SDP answer attached). Neither expect other arguments, as the context
+ * is implicitly derived from the handle they're sent on:
+ *
+\verbatim
+{
+	"request" : "pause"
+}
+\endverbatim
+ *
+\verbatim
+{
+	"request" : "start"
+}
+\endverbatim
+ *
+ * Unsurprisingly, they just result in, respectively, \c paused and
+ * \c started events:
+ *
+\verbatim
+{
+	"videoroom" : "event",
+	"paused" : "ok"
+}
+\endverbatim
+ *
+\verbatim
+{
+	"videoroom" : "event",
+	"started" : "ok"
+}
+\endverbatim
+ *
+ * For more drill-down manipulations of a subscription, a \c configure
+ * request can be used instead. This request allows subscribers to dynamically
+ * change some properties associated to their media subscription, e.g.,
+ * in terms of what should and should not be sent at a specific time. A
+ * \c configure request must be formatted as follows:
+ *
+\verbatim
+{
+	"request" : "configure",
+	"audio" : <true|false, depending on whether audio should be relayed or not; optional>,
+	"video" : <true|false, depending on whether video should be relayed or not; optional>,
+	"data" : <true|false, depending on whether datachannel messages should be relayed or not; optional>,
+	"substream" : <substream to receive (0-2), in case simulcasting is enabled; optional>,
+	"temporal" : <temporal layers to receive (0-2), in case simulcasting is enabled; optional>,
+	"spatial_layer" : <spatial layer to receive (0-1), in case VP9-SVC is enabled; optional>,
+	"temporal_layer" : <temporal layers to receive (0-2), in case VP9-SVC is enabled; optional>
+}
+\endverbatim
+ *
+ * As you can see, the \c audio , \c video and \c data properties can be
+ * used as a media-level pause/resume functionality, whereas \c pause
+ * and \c start simply pause and resume all streams at the same time.
+ * The \c substream and \c temporal properties, instead, only make sense
+ * when the mountpoint is configured with video simulcasting support, and
+ * as such the viewer is interested in receiving a specific substream
+ * or temporal layer, rather than any other of the available ones.
+ * The \c spatial_layer and \c temporal_layer have exactly the same meaning,
+ * but within the context of VP9-SVC publishers, and will have no effect
+ * on subscriptions associated to regular publishers.
+ *
+ * Another interesting feature that subscribers can take advantage of is the
+ * so-called publisher "switching". Basically, when subscribed to a specific
+ * publisher and receiving media from them, you can at any time "switch"
+ * to a different publisher, and as such start receiving media from that
+ * other mountpoint instead. Think of it as changing channel on a TV: you
+ * keep on using the same PeerConnection, the plugin simply changes the
+ * source of the media transparently. Of course, while powerful and effective
+ * this request has some limitations. First of all, it switches both audio
+ * and video, meaning you can't just switch video and keep the audio from
+ * the previous publisher, for instance; besides, the two publishers
+ * must have the same media configuration, that is, use the same codecs,
+ * the same payload types, etc. In fact, since the same PeerConnection is
+ * used for this feature, switching to a publisher with a different
+ * configuration might result in media incompatible with the PeerConnection
+ * setup being relayed to the subscriber, and as such in no audio/video being
+ * played. That said, a \c switch request must be formatted like this:
+ *
+\verbatim
+{
+	"request" : "switch",
+	"feed" : <unique ID of the new publisher to switch to; mandatory>,
+	"audio" : <true|false, depending on whether audio should be relayed or not; optional>,
+	"video" : <true|false, depending on whether video should be relayed or not; optional>,
+	"data" : <true|false, depending on whether datachannel messages should be relayed or not; optional>
+}
+\endverbatim
+ *
+ * If successful, you'll be unsubscribed from the previous publisher,
+ * and subscribed to the new publisher instead. The event to confirm
+ * the switch was successful will look like this:
+ *
+\verbatim
+{
+	"videoroom" : "event",
+	"switched" : "ok",
+	"room" : <room ID>,
+	"id" : <unique ID of the new publisher>
+}
+\endverbatim
+ *
+ * Finally, to stop the subscription to the mountpoint and tear down the
+ * related PeerConnection, you can use the \c leave request. Since context
+ * is implicit, no other argument is required:
+ *
+\verbatim
+{
+	"request" : "leave"
+}
+\endverbatim
+ *
+ * If successful, the plugin will attempt to tear down the PeerConnection,
+ * and will send back a \c left event:
+ *
+\verbatim
+{
+	"videoroom" : "event",
+	"left" : "ok",
+}
+\endverbatim
+ *
+ *
+ *
+ *
+ *
+ *
  * \ingroup plugins
  * \ref plugins
  */
@@ -346,6 +1212,7 @@ static struct janus_json_parameter configure_parameters[] = {
 static struct janus_json_parameter subscriber_parameters[] = {
 	{"feed", JSON_INTEGER, JANUS_JSON_PARAM_REQUIRED | JANUS_JSON_PARAM_POSITIVE},
 	{"private_id", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
+	{"close_pc", JANUS_JSON_BOOL, 0},
 	{"audio", JANUS_JSON_BOOL, 0},
 	{"video", JANUS_JSON_BOOL, 0},
 	{"data", JANUS_JSON_BOOL, 0},
@@ -654,7 +1521,9 @@ static guint32 janus_videoroom_rtp_forwarder_add_helper(janus_videoroom_publishe
 typedef struct janus_videoroom_subscriber {
 	janus_videoroom_session *session;
 	janus_videoroom *room;	/* Room */
+	guint64 room_id;		/* Unique room ID */
 	janus_videoroom_publisher *feed;	/* Participant this subscriber is subscribed to */
+	gboolean close_pc;		/* Whether we should automatically close the PeerConnection when the publisher goes away */
 	guint32 pvt_id;			/* Private ID of the participant that is subscribing (if available/provided) */
 	janus_sdp *sdp;			/* Offer we sent this listener (may be updated within renegotiations) */
 	janus_rtp_switching_context context;	/* Needed in case there are publisher switches on this subscriber */
@@ -825,7 +1694,7 @@ static void janus_videoroom_message_free(janus_videoroom_message *msg) {
 
 
 static guint32 janus_videoroom_rtp_forwarder_add_helper(janus_videoroom_publisher *p,
-		const gchar* host, int port, int pt, uint32_t ssrc,
+		const gchar *host, int port, int pt, uint32_t ssrc,
 		int srtp_suite, const char *srtp_crypto,
 		int substream, gboolean is_video, gboolean is_data) {
 	if(!p || !host) {
@@ -1370,7 +2239,16 @@ static void janus_videoroom_notify_participants(janus_videoroom_publisher *parti
 
 static void janus_videoroom_participant_joining(janus_videoroom_publisher *p) {
 	/* we need to check if the room still exists, may have been destroyed already */
-	if(p->room && !g_atomic_int_get(&p->room->destroyed) && p->room->notify_joining) {
+	if(p->room == NULL)
+		return;
+	janus_mutex_lock(&rooms_mutex);
+	if (!g_hash_table_lookup(rooms, &p->room_id)) {
+		JANUS_LOG(LOG_ERR, "No such room (%"SCNu64")\n", p->room_id);
+		janus_mutex_unlock(&rooms_mutex);
+		return;
+	}
+	janus_mutex_unlock(&rooms_mutex);
+	if(!g_atomic_int_get(&p->room->destroyed) && p->room->notify_joining) {
 		json_t *event = json_object();
 		json_t *user = json_object();
 		json_object_set_new(user, "id", json_integer(p->user_id));
@@ -1378,11 +2256,9 @@ static void janus_videoroom_participant_joining(janus_videoroom_publisher *p) {
 			json_object_set_new(user, "display", json_string(p->display));
 		}
 		json_object_set_new(event, "videoroom", json_string("event"));
-		json_object_set_new(event, "room", json_integer(p->room->room_id));
+		json_object_set_new(event, "room", json_integer(p->room_id));
 		json_object_set_new(event, "joining", user);
-		janus_mutex_lock(&p->room->mutex);
 		janus_videoroom_notify_participants(p, event);
-		janus_mutex_unlock(&p->room->mutex);
 		/* user gets deref-ed by the owner event */
 		json_decref(event);
 	}
@@ -1390,8 +2266,10 @@ static void janus_videoroom_participant_joining(janus_videoroom_publisher *p) {
 
 static void janus_videoroom_leave_or_unpublish(janus_videoroom_publisher *participant, gboolean is_leaving, gboolean kicked) {
 	/* we need to check if the room still exists, may have been destroyed already */
+	if(participant->room == NULL)
+		return;
 	janus_mutex_lock(&rooms_mutex);
-	if (participant->room_id && !g_hash_table_lookup(rooms, &participant->room_id)) {
+	if (!g_hash_table_lookup(rooms, &participant->room_id)) {
 		JANUS_LOG(LOG_ERR, "No such room (%"SCNu64")\n", participant->room_id);
 		janus_mutex_unlock(&rooms_mutex);
 		return;
@@ -2452,7 +3330,7 @@ struct janus_plugin_result *janus_videoroom_handle_message(janus_plugin_session 
 		}
 		guint64 room_id = json_integer_value(room);
 		guint64 publisher_id = json_integer_value(pub_id);
-		const gchar *host = json_string_value(json_host);
+		const char *host = json_string_value(json_host);
 		janus_mutex_lock(&rooms_mutex);
 		janus_videoroom *videoroom = NULL;
 		error_code = janus_videoroom_access_room(root, TRUE, FALSE, &videoroom, error_cause, sizeof(error_cause));
@@ -2771,7 +3649,7 @@ struct janus_plugin_result *janus_videoroom_handle_message(janus_plugin_session 
 		/* Prepare an event for this */
 		json_t *kicked = json_object();
 		json_object_set_new(kicked, "videoroom", json_string("event"));
-		json_object_set_new(kicked, "room", json_integer(participant->room->room_id));
+		json_object_set_new(kicked, "room", json_integer(participant->room_id));
 		json_object_set_new(kicked, "leaving", json_string("ok"));
 		json_object_set_new(kicked, "reason", json_string("kicked"));
 		int ret = gateway->push_event(participant->session->handle, &janus_videoroom_plugin, NULL, kicked, NULL);
@@ -2799,6 +3677,14 @@ struct janus_plugin_result *janus_videoroom_handle_message(janus_plugin_session 
 		}
 		/* This publisher is leaving, tell everybody */
 		janus_videoroom_leave_or_unpublish(participant, TRUE, TRUE);
+		/* Also notify event handlers */
+		if(notify_events && gateway->events_is_enabled()) {
+			json_t *info = json_object();
+			json_object_set_new(info, "event", json_string("kicked"));
+			json_object_set_new(info, "room", json_integer(room_id));
+			json_object_set_new(info, "id", json_integer(user_id));
+			gateway->notify_event(&janus_videoroom_plugin, session->handle, info);
+		}
 		/* Tell the core to tear down the PeerConnection, hangup_media will do the rest */
 		if(participant && participant->session)
 			gateway->close_pc(participant->session->handle);
@@ -2943,13 +3829,14 @@ struct janus_plugin_result *janus_videoroom_handle_message(janus_plugin_session 
 		janus_mutex_unlock(&videoroom->mutex);
 		janus_mutex_unlock(&rooms_mutex);
 		response = json_object();
+		json_object_set_new(response, "videoroom", json_string("forwarders"));
 		json_object_set_new(response, "room", json_integer(room_id));
 		json_object_set_new(response, "rtp_forwarders", list);
 		goto plugin_response;
 	} else if(!strcasecmp(request_text, "join") || !strcasecmp(request_text, "joinandconfigure")
 			|| !strcasecmp(request_text, "configure") || !strcasecmp(request_text, "publish") || !strcasecmp(request_text, "unpublish")
 			|| !strcasecmp(request_text, "start") || !strcasecmp(request_text, "pause") || !strcasecmp(request_text, "switch")
-			|| !strcasecmp(request_text, "stop") || !strcasecmp(request_text, "leave")) {
+			|| !strcasecmp(request_text, "leave")) {
 		/* These messages are handled asynchronously */
 
 		janus_videoroom_message *msg = g_malloc(sizeof(janus_videoroom_message));
@@ -3030,7 +3917,7 @@ void janus_videoroom_setup_media(janus_plugin_session *handle) {
 			json_array_append_new(list, pl);
 			json_t *pub = json_object();
 			json_object_set_new(pub, "videoroom", json_string("event"));
-			json_object_set_new(pub, "room", json_integer(participant->room->room_id));
+			json_object_set_new(pub, "room", json_integer(participant->room_id));
 			json_object_set_new(pub, "publishers", list);
 			GHashTableIter iter;
 			gpointer value;
@@ -3051,7 +3938,7 @@ void janus_videoroom_setup_media(janus_plugin_session *handle) {
 			if(notify_events && gateway->events_is_enabled()) {
 				json_t *info = json_object();
 				json_object_set_new(info, "event", json_string("published"));
-				json_object_set_new(info, "room", json_integer(participant->room->room_id));
+				json_object_set_new(info, "room", json_integer(participant->room_id));
 				json_object_set_new(info, "id", json_integer(participant->user_id));
 				gateway->notify_event(&janus_videoroom_plugin, session->handle, info);
 			}
@@ -3075,7 +3962,7 @@ void janus_videoroom_setup_media(janus_plugin_session *handle) {
 					if(notify_events && gateway->events_is_enabled()) {
 						json_t *info = json_object();
 						json_object_set_new(info, "event", json_string("subscribed"));
-						json_object_set_new(info, "room", json_integer(p->room->room_id));
+						json_object_set_new(info, "room", json_integer(p->room_id));
 						json_object_set_new(info, "feed", json_integer(p->user_id));
 						gateway->notify_event(&janus_videoroom_plugin, session->handle, info);
 					}
@@ -3293,7 +4180,7 @@ void janus_videoroom_incoming_rtp(janus_plugin_session *handle, int video, char 
 					participant->remb_latest = janus_get_monotonic_time();
 			}
 			/* Generate FIR/PLI too, if needed */
-			if(video && participant->video_active && (participant->room->fir_freq > 0)) {
+			if(video && participant->video_active && (videoroom->fir_freq > 0)) {
 				/* We generate RTCP every tot seconds/frames */
 				gint64 now = janus_get_monotonic_time();
 				/* First check if this is a keyframe, though: if so, we reset the timer */
@@ -3311,7 +4198,7 @@ void janus_videoroom_incoming_rtp(janus_plugin_session *handle, int video, char 
 					if(janus_h264_is_keyframe(payload, plen))
 						participant->fir_latest = now;
 				}
-				if((now-participant->fir_latest) >= ((gint64)participant->room->fir_freq*G_USEC_PER_SEC)) {
+				if((now-participant->fir_latest) >= ((gint64)videoroom->fir_freq*G_USEC_PER_SEC)) {
 					/* FIXME We send a FIR every tot seconds */
 					participant->fir_latest = now;
 					char rtcpbuf[24];
@@ -3498,7 +4385,7 @@ static void janus_videoroom_recorder_create(janus_videoroom_publisher *participa
 		} else {
 			/* Build a filename */
 			g_snprintf(filename, 255, "videoroom-%"SCNu64"-user-%"SCNu64"-%"SCNi64"-audio",
-				participant->room->room_id, participant->user_id, now);
+				participant->room_id, participant->user_id, now);
 			participant->arc = janus_recorder_create(participant->room->rec_dir,
 				janus_videoroom_audiocodec_name(participant->acodec), filename);
 			if(participant->arc == NULL) {
@@ -3519,7 +4406,7 @@ static void janus_videoroom_recorder_create(janus_videoroom_publisher *participa
 		} else {
 			/* Build a filename */
 			g_snprintf(filename, 255, "videoroom-%"SCNu64"-user-%"SCNu64"-%"SCNi64"-video",
-				participant->room->room_id, participant->user_id, now);
+				participant->room_id, participant->user_id, now);
 			participant->vrc = janus_recorder_create(participant->room->rec_dir,
 				janus_videoroom_videocodec_name(participant->vcodec), filename);
 			if(participant->vrc == NULL) {
@@ -3540,7 +4427,7 @@ static void janus_videoroom_recorder_create(janus_videoroom_publisher *participa
 		} else {
 			/* Build a filename */
 			g_snprintf(filename, 255, "videoroom-%"SCNu64"-user-%"SCNu64"-%"SCNi64"-data",
-				participant->room->room_id, participant->user_id, now);
+				participant->room_id, participant->user_id, now);
 			participant->drc = janus_recorder_create(participant->room->rec_dir,
 				"text", filename);
 			if(participant->drc == NULL) {
@@ -3637,7 +4524,7 @@ static void janus_videoroom_hangup_media_internal(janus_plugin_session *handle) 
 		if(participant->room && gateway->events_is_enabled()) {
 			json_t *info = json_object();
 			json_object_set_new(info, "event", json_string("unpublished"));
-			json_object_set_new(info, "room", json_integer(participant->room->room_id));
+			json_object_set_new(info, "room", json_integer(participant->room_id));
 			json_object_set_new(info, "id", json_integer(participant->user_id));
 			gateway->notify_event(&janus_videoroom_plugin, handle, info);
 		}
@@ -3662,7 +4549,7 @@ static void janus_videoroom_hangup_media_internal(janus_plugin_session *handle) 
 				if(notify_events && gateway->events_is_enabled()) {
 					json_t *info = json_object();
 					json_object_set_new(info, "event", json_string("unsubscribed"));
-					json_object_set_new(info, "room", json_integer(publisher->room->room_id));
+					json_object_set_new(info, "room", json_integer(publisher->room_id));
 					json_object_set_new(info, "feed", json_integer(publisher->user_id));
 					gateway->notify_event(&janus_videoroom_plugin, session->handle, info);
 				}
@@ -3876,27 +4763,27 @@ static void *janus_videoroom_handler(void *data) {
 				/* In case we also wanted to configure */
 				if(audio) {
 					publisher->audio_active = json_is_true(audio);
-					JANUS_LOG(LOG_VERB, "Setting audio property: %s (room %"SCNu64", user %"SCNu64")\n", publisher->audio_active ? "true" : "false", publisher->room->room_id, publisher->user_id);
+					JANUS_LOG(LOG_VERB, "Setting audio property: %s (room %"SCNu64", user %"SCNu64")\n", publisher->audio_active ? "true" : "false", publisher->room_id, publisher->user_id);
 				}
 				if(video) {
 					publisher->video_active = json_is_true(video);
-					JANUS_LOG(LOG_VERB, "Setting video property: %s (room %"SCNu64", user %"SCNu64")\n", publisher->video_active ? "true" : "false", publisher->room->room_id, publisher->user_id);
+					JANUS_LOG(LOG_VERB, "Setting video property: %s (room %"SCNu64", user %"SCNu64")\n", publisher->video_active ? "true" : "false", publisher->room_id, publisher->user_id);
 				}
 				if(data) {
 					publisher->data_active = json_is_true(data);
-					JANUS_LOG(LOG_VERB, "Setting data property: %s (room %"SCNu64", user %"SCNu64")\n", publisher->data_active ? "true" : "false", publisher->room->room_id, publisher->user_id);
+					JANUS_LOG(LOG_VERB, "Setting data property: %s (room %"SCNu64", user %"SCNu64")\n", publisher->data_active ? "true" : "false", publisher->room_id, publisher->user_id);
 				}
 				if(bitrate) {
 					publisher->bitrate = json_integer_value(bitrate);
-					JANUS_LOG(LOG_VERB, "Setting video bitrate: %"SCNu32" (room %"SCNu64", user %"SCNu64")\n", publisher->bitrate, publisher->room->room_id, publisher->user_id);
+					JANUS_LOG(LOG_VERB, "Setting video bitrate: %"SCNu32" (room %"SCNu64", user %"SCNu64")\n", publisher->bitrate, publisher->room_id, publisher->user_id);
 				}
 				if(record) {
 					publisher->recording_active = json_is_true(record);
-					JANUS_LOG(LOG_VERB, "Setting record property: %s (room %"SCNu64", user %"SCNu64")\n", publisher->recording_active ? "true" : "false", publisher->room->room_id, publisher->user_id);
+					JANUS_LOG(LOG_VERB, "Setting record property: %s (room %"SCNu64", user %"SCNu64")\n", publisher->recording_active ? "true" : "false", publisher->room_id, publisher->user_id);
 				}
 				if(recfile) {
 					publisher->recording_base = g_strdup(json_string_value(recfile));
-					JANUS_LOG(LOG_VERB, "Setting recording basename: %s (room %"SCNu64", user %"SCNu64")\n", publisher->recording_base, publisher->room->room_id, publisher->user_id);
+					JANUS_LOG(LOG_VERB, "Setting recording basename: %s (room %"SCNu64", user %"SCNu64")\n", publisher->recording_base, publisher->room_id, publisher->user_id);
 				}
 				/* Done */
 				janus_mutex_lock(&session->mutex);
@@ -3965,6 +4852,8 @@ static void *janus_videoroom_handler(void *data) {
 				guint64 feed_id = json_integer_value(feed);
 				json_t *pvt = json_object_get(root, "private_id");
 				guint64 pvt_id = json_integer_value(pvt);
+				json_t *cpc = json_object_get(root, "close_pc");
+				gboolean close_pc  = cpc ? json_is_true(cpc) : TRUE;
 				json_t *audio = json_object_get(root, "audio");
 				json_t *video = json_object_get(root, "video");
 				json_t *data = json_object_get(root, "data");
@@ -4002,6 +4891,7 @@ static void *janus_videoroom_handler(void *data) {
 					videoroom = NULL;
 					subscriber->feed = publisher;
 					subscriber->pvt_id = pvt_id;
+					subscriber->close_pc = close_pc;
 					/* Initialize the subscriber context */
 					janus_rtp_switching_context_reset(&subscriber->context);
 					subscriber->audio_offered = offer_audio ? json_is_true(offer_audio) : TRUE;	/* True by default */
@@ -4186,7 +5076,7 @@ static void *janus_videoroom_handler(void *data) {
 						janus_mutex_unlock(&participant->subscribers_mutex);
 					}
 					participant->audio_active = audio_active;
-					JANUS_LOG(LOG_VERB, "Setting audio property: %s (room %"SCNu64", user %"SCNu64")\n", participant->audio_active ? "true" : "false", participant->room->room_id, participant->user_id);
+					JANUS_LOG(LOG_VERB, "Setting audio property: %s (room %"SCNu64", user %"SCNu64")\n", participant->audio_active ? "true" : "false", participant->room_id, participant->user_id);
 				}
 				if(audiocodec && json_string_value(json_object_get(msg->jsep, "sdp")) != NULL) {
 					/* The participant would like to use an audio codec in particular */
@@ -4196,7 +5086,7 @@ static void *janus_videoroom_handler(void *data) {
 							acodec != participant->room->acodec[1] &&
 							acodec != participant->room->acodec[2])) {
 						JANUS_LOG(LOG_ERR, "Participant asked for audio codec '%s', but it's not allowed (room %"SCNu64", user %"SCNu64")\n",
-							json_string_value(audiocodec), participant->room->room_id, participant->user_id);
+							json_string_value(audiocodec), participant->room_id, participant->user_id);
 						janus_refcount_decrease(&participant->ref);
 						error_code = JANUS_VIDEOROOM_ERROR_INVALID_ELEMENT;
 						g_snprintf(error_cause, 512, "Audio codec unavailable in this room");
@@ -4204,7 +5094,7 @@ static void *janus_videoroom_handler(void *data) {
 					}
 					participant->acodec = acodec;
 					JANUS_LOG(LOG_VERB, "Participant asked for audio codec '%s' (room %"SCNu64", user %"SCNu64")\n",
-						json_string_value(audiocodec), participant->room->room_id, participant->user_id);
+						json_string_value(audiocodec), participant->room_id, participant->user_id);
 				}
 				if(video) {
 					gboolean video_active = json_is_true(video);
@@ -4221,7 +5111,7 @@ static void *janus_videoroom_handler(void *data) {
 						janus_mutex_unlock(&participant->subscribers_mutex);
 					}
 					participant->video_active = video_active;
-					JANUS_LOG(LOG_VERB, "Setting video property: %s (room %"SCNu64", user %"SCNu64")\n", participant->video_active ? "true" : "false", participant->room->room_id, participant->user_id);
+					JANUS_LOG(LOG_VERB, "Setting video property: %s (room %"SCNu64", user %"SCNu64")\n", participant->video_active ? "true" : "false", participant->room_id, participant->user_id);
 				}
 				if(videocodec && json_string_value(json_object_get(msg->jsep, "sdp")) != NULL) {
 					/* The participant would like to use a video codec in particular */
@@ -4231,7 +5121,7 @@ static void *janus_videoroom_handler(void *data) {
 							vcodec != participant->room->vcodec[1] &&
 							vcodec != participant->room->vcodec[2])) {
 						JANUS_LOG(LOG_ERR, "Participant asked for video codec '%s', but it's not allowed (room %"SCNu64", user %"SCNu64")\n",
-							json_string_value(videocodec), participant->room->room_id, participant->user_id);
+							json_string_value(videocodec), participant->room_id, participant->user_id);
 						janus_refcount_decrease(&participant->ref);
 						error_code = JANUS_VIDEOROOM_ERROR_INVALID_ELEMENT;
 						g_snprintf(error_cause, 512, "Video codec unavailable in this room");
@@ -4239,16 +5129,16 @@ static void *janus_videoroom_handler(void *data) {
 					}
 					participant->vcodec = vcodec;
 					JANUS_LOG(LOG_VERB, "Participant asked for video codec '%s' (room %"SCNu64", user %"SCNu64")\n",
-						json_string_value(videocodec), participant->room->room_id, participant->user_id);
+						json_string_value(videocodec), participant->room_id, participant->user_id);
 				}
 				if(data) {
 					gboolean data_active = json_is_true(data);
 					participant->data_active = data_active;
-					JANUS_LOG(LOG_VERB, "Setting data property: %s (room %"SCNu64", user %"SCNu64")\n", participant->data_active ? "true" : "false", participant->room->room_id, participant->user_id);
+					JANUS_LOG(LOG_VERB, "Setting data property: %s (room %"SCNu64", user %"SCNu64")\n", participant->data_active ? "true" : "false", participant->room_id, participant->user_id);
 				}
 				if(bitrate) {
 					participant->bitrate = json_integer_value(bitrate);
-					JANUS_LOG(LOG_VERB, "Setting video bitrate: %"SCNu32" (room %"SCNu64", user %"SCNu64")\n", participant->bitrate, participant->room->room_id, participant->user_id);
+					JANUS_LOG(LOG_VERB, "Setting video bitrate: %"SCNu32" (room %"SCNu64", user %"SCNu64")\n", participant->bitrate, participant->room_id, participant->user_id);
 					/* Send a new REMB */
 					if(session->started)
 						participant->remb_latest = janus_get_monotonic_time();
@@ -4260,11 +5150,11 @@ static void *janus_videoroom_handler(void *data) {
 				gboolean prev_recording_active = participant->recording_active;
 				if(record) {
 					participant->recording_active = json_is_true(record);
-					JANUS_LOG(LOG_VERB, "Setting record property: %s (room %"SCNu64", user %"SCNu64")\n", participant->recording_active ? "true" : "false", participant->room->room_id, participant->user_id);
+					JANUS_LOG(LOG_VERB, "Setting record property: %s (room %"SCNu64", user %"SCNu64")\n", participant->recording_active ? "true" : "false", participant->room_id, participant->user_id);
 				}
 				if(recfile) {
 					participant->recording_base = g_strdup(json_string_value(recfile));
-					JANUS_LOG(LOG_VERB, "Setting recording basename: %s (room %"SCNu64", user %"SCNu64")\n", participant->recording_base, participant->room->room_id, participant->user_id);
+					JANUS_LOG(LOG_VERB, "Setting recording basename: %s (room %"SCNu64", user %"SCNu64")\n", participant->recording_base, participant->room_id, participant->user_id);
 				}
 				/* Do we need to do something with the recordings right now? */
 				if(participant->recording_active != prev_recording_active) {
@@ -4321,13 +5211,13 @@ static void *janus_videoroom_handler(void *data) {
 				/* Done */
 				event = json_object();
 				json_object_set_new(event, "videoroom", json_string("event"));
-				json_object_set_new(event, "room", json_integer(participant->room->room_id));
+				json_object_set_new(event, "room", json_integer(participant->room_id));
 				json_object_set_new(event, "configured", json_string("ok"));
 				/* Also notify event handlers */
 				if(notify_events && gateway->events_is_enabled()) {
 					json_t *info = json_object();
 					json_object_set_new(info, "event", json_string("configured"));
-					json_object_set_new(info, "room", json_integer(participant->room->room_id));
+					json_object_set_new(info, "room", json_integer(participant->room_id));
 					json_object_set_new(info, "id", json_integer(participant->user_id));
 					json_object_set_new(info, "audio_active", participant->audio_active ? json_true() : json_false());
 					json_object_set_new(info, "video_active", participant->video_active ? json_true() : json_false());
@@ -4360,13 +5250,13 @@ static void *janus_videoroom_handler(void *data) {
 				/* Done */
 				event = json_object();
 				json_object_set_new(event, "videoroom", json_string("event"));
-				json_object_set_new(event, "room", json_integer(participant->room->room_id));
+				json_object_set_new(event, "room", json_integer(participant->room_id));
 				json_object_set_new(event, "unpublished", json_string("ok"));
 			} else if(!strcasecmp(request_text, "leave")) {
 				/* Prepare an event to confirm the request */
 				event = json_object();
 				json_object_set_new(event, "videoroom", json_string("event"));
-				json_object_set_new(event, "room", json_integer(participant->room->room_id));
+				json_object_set_new(event, "room", json_integer(participant->room_id));
 				json_object_set_new(event, "leaving", json_string("ok"));
 				/* This publisher is leaving, tell everybody */
 				janus_videoroom_leave_or_unpublish(participant, TRUE, FALSE);
@@ -4409,7 +5299,7 @@ static void *janus_videoroom_handler(void *data) {
 				subscriber->paused = FALSE;
 				event = json_object();
 				json_object_set_new(event, "videoroom", json_string("event"));
-				json_object_set_new(event, "room", json_integer(subscriber->room->room_id));
+				json_object_set_new(event, "room", json_integer(subscriber->room_id));
 				json_object_set_new(event, "started", json_string("ok"));
 			} else if(!strcasecmp(request_text, "configure")) {
 				JANUS_VALIDATE_JSON_OBJECT(root, configure_parameters,
@@ -4476,7 +5366,7 @@ static void *janus_videoroom_handler(void *data) {
 							/* No need to do anything, we're already getting the right substream, so notify the user */
 							json_t *event = json_object();
 							json_object_set_new(event, "videoroom", json_string("event"));
-							json_object_set_new(event, "room", json_integer(subscriber->room->room_id));
+							json_object_set_new(event, "room", json_integer(subscriber->room_id));
 							json_object_set_new(event, "substream", json_integer(subscriber->substream));
 							gateway->push_event(msg->handle, &janus_videoroom_plugin, NULL, event, NULL);
 							json_decref(event);
@@ -4502,7 +5392,7 @@ static void *janus_videoroom_handler(void *data) {
 							/* No need to do anything, we're already getting the right temporal, so notify the user */
 							json_t *event = json_object();
 							json_object_set_new(event, "videoroom", json_string("event"));
-							json_object_set_new(event, "room", json_integer(subscriber->room->room_id));
+							json_object_set_new(event, "room", json_integer(subscriber->room_id));
 							json_object_set_new(event, "temporal", json_integer(subscriber->templayer));
 							gateway->push_event(msg->handle, &janus_videoroom_plugin, NULL, event, NULL);
 							json_decref(event);
@@ -4532,7 +5422,7 @@ static void *janus_videoroom_handler(void *data) {
 							/* No need to do anything, we're already getting the right spatial layer, so notify the user */
 							json_t *event = json_object();
 							json_object_set_new(event, "videoroom", json_string("event"));
-							json_object_set_new(event, "room", json_integer(subscriber->room->room_id));
+							json_object_set_new(event, "room", json_integer(subscriber->room_id));
 							json_object_set_new(event, "spatial_layer", json_integer(subscriber->spatial_layer));
 							gateway->push_event(msg->handle, &janus_videoroom_plugin, NULL, event, NULL);
 							json_decref(event);
@@ -4560,7 +5450,7 @@ static void *janus_videoroom_handler(void *data) {
 							/* No need to do anything, we're already getting the right temporal layer, so notify the user */
 							json_t *event = json_object();
 							json_object_set_new(event, "videoroom", json_string("event"));
-							json_object_set_new(event, "room", json_integer(subscriber->room->room_id));
+							json_object_set_new(event, "room", json_integer(subscriber->room_id));
 							json_object_set_new(event, "temporal_layer", json_integer(subscriber->temporal_layer));
 							gateway->push_event(msg->handle, &janus_videoroom_plugin, NULL, event, NULL);
 							json_decref(event);
@@ -4570,7 +5460,7 @@ static void *janus_videoroom_handler(void *data) {
 				}
 				event = json_object();
 				json_object_set_new(event, "videoroom", json_string("event"));
-				json_object_set_new(event, "room", json_integer(subscriber->room->room_id));
+				json_object_set_new(event, "room", json_integer(subscriber->room_id));
 				json_object_set_new(event, "configured", json_string("ok"));
 				/* The user may be interested in an ICE restart */
 				gboolean do_restart = restart ? json_is_true(restart) : FALSE;
@@ -4674,7 +5564,7 @@ static void *janus_videoroom_handler(void *data) {
 				subscriber->paused = TRUE;
 				event = json_object();
 				json_object_set_new(event, "videoroom", json_string("event"));
-				json_object_set_new(event, "room", json_integer(subscriber->room->room_id));
+				json_object_set_new(event, "room", json_integer(subscriber->room_id));
 				json_object_set_new(event, "paused", json_string("ok"));
 			} else if(!strcasecmp(request_text, "switch")) {
 				/* This subscriber wants to switch to a different publisher */
@@ -4694,10 +5584,10 @@ static void *janus_videoroom_handler(void *data) {
 					g_snprintf(error_cause, 512, "No such room ");
 					goto error;
 				}
-				if(g_atomic_int_get(&subscriber->room->destroyed)) {
-					JANUS_LOG(LOG_ERR, "Room Destroyed (%"SCNu64")\n", subscriber->room->room_id);
+				if(g_atomic_int_get(&subscriber->destroyed)) {
+					JANUS_LOG(LOG_ERR, "Room Destroyed (%"SCNu64")\n", subscriber->room_id);
 					error_code = JANUS_VIDEOROOM_ERROR_NO_SUCH_ROOM;
-					g_snprintf(error_cause, 512, "No such room (%"SCNu64")", subscriber->room->room_id);
+					g_snprintf(error_cause, 512, "No such room (%"SCNu64")", subscriber->room_id);
 					goto error;
 				}
 				janus_mutex_lock(&subscriber->room->mutex);
@@ -4772,7 +5662,7 @@ static void *janus_videoroom_handler(void *data) {
 				event = json_object();
 				json_object_set_new(event, "videoroom", json_string("event"));
 				json_object_set_new(event, "switched", json_string("ok"));
-				json_object_set_new(event, "room", json_integer(subscriber->room->room_id));
+				json_object_set_new(event, "room", json_integer(subscriber->room_id));
 				json_object_set_new(event, "id", json_integer(feed_id));
 				if(publisher->display)
 					json_object_set_new(event, "display", json_string(publisher->display));
@@ -4780,7 +5670,7 @@ static void *janus_videoroom_handler(void *data) {
 				if(notify_events && gateway->events_is_enabled()) {
 					json_t *info = json_object();
 					json_object_set_new(info, "event", json_string("switched"));
-					json_object_set_new(info, "room", json_integer(publisher->room->room_id));
+					json_object_set_new(info, "room", json_integer(publisher->room_id));
 					json_object_set_new(info, "feed", json_integer(publisher->user_id));
 					gateway->notify_event(&janus_videoroom_plugin, session->handle, info);
 				}
@@ -5269,7 +6159,7 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 					/* Notify the viewer */
 					json_t *event = json_object();
 					json_object_set_new(event, "videoroom", json_string("event"));
-					json_object_set_new(event, "room", json_integer(subscriber->room->room_id));
+					json_object_set_new(event, "room", json_integer(subscriber->room_id));
 					json_object_set_new(event, "temporal_layer", json_integer(subscriber->temporal_layer));
 					gateway->push_event(subscriber->session->handle, &janus_videoroom_plugin, NULL, event, NULL);
 					json_decref(event);
@@ -5284,7 +6174,7 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 					/* Notify the viewer */
 					json_t *event = json_object();
 					json_object_set_new(event, "videoroom", json_string("event"));
-					json_object_set_new(event, "room", json_integer(subscriber->room->room_id));
+					json_object_set_new(event, "room", json_integer(subscriber->room_id));
 					json_object_set_new(event, "temporal_layer", json_integer(subscriber->temporal_layer));
 					gateway->push_event(subscriber->session->handle, &janus_videoroom_plugin, NULL, event, NULL);
 					json_decref(event);
@@ -5308,7 +6198,7 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 					/* Notify the viewer */
 					json_t *event = json_object();
 					json_object_set_new(event, "videoroom", json_string("event"));
-					json_object_set_new(event, "room", json_integer(subscriber->room->room_id));
+					json_object_set_new(event, "room", json_integer(subscriber->room_id));
 					json_object_set_new(event, "spatial_layer", json_integer(subscriber->spatial_layer));
 					gateway->push_event(subscriber->session->handle, &janus_videoroom_plugin, NULL, event, NULL);
 					json_decref(event);
@@ -5323,7 +6213,7 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 					/* Notify the viewer */
 					json_t *event = json_object();
 					json_object_set_new(event, "videoroom", json_string("event"));
-					json_object_set_new(event, "room", json_integer(subscriber->room->room_id));
+					json_object_set_new(event, "room", json_integer(subscriber->room_id));
 					json_object_set_new(event, "spatial_layer", json_integer(subscriber->spatial_layer));
 					gateway->push_event(subscriber->session->handle, &janus_videoroom_plugin, NULL, event, NULL);
 					json_decref(event);
@@ -5377,7 +6267,7 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 						/* Notify the viewer */
 						json_t *event = json_object();
 						json_object_set_new(event, "videoroom", json_string("event"));
-						json_object_set_new(event, "room", json_integer(subscriber->room->room_id));
+						json_object_set_new(event, "room", json_integer(subscriber->room_id));
 						json_object_set_new(event, "substream", json_integer(subscriber->substream));
 						gateway->push_event(subscriber->session->handle, &janus_videoroom_plugin, NULL, event, NULL);
 						json_decref(event);
@@ -5415,7 +6305,7 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 						/* Notify the viewer */
 						json_t *event = json_object();
 						json_object_set_new(event, "videoroom", json_string("event"));
-						json_object_set_new(event, "room", json_integer(subscriber->room->room_id));
+						json_object_set_new(event, "room", json_integer(subscriber->room_id));
 						json_object_set_new(event, "substream", json_integer(subscriber->substream));
 						gateway->push_event(subscriber->session->handle, &janus_videoroom_plugin, NULL, event, NULL);
 						json_decref(event);
@@ -5442,7 +6332,7 @@ static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data) 
 					/* Notify the user */
 					json_t *event = json_object();
 					json_object_set_new(event, "videoroom", json_string("event"));
-					json_object_set_new(event, "room", json_integer(subscriber->room->room_id));
+					json_object_set_new(event, "room", json_integer(subscriber->room_id));
 					json_object_set_new(event, "temporal", json_integer(subscriber->templayer));
 					gateway->push_event(subscriber->session->handle, &janus_videoroom_plugin, NULL, event, NULL);
 					json_decref(event);

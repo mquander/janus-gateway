@@ -41,10 +41,11 @@ A couple of plugins depend on a few more libraries:
 
 * [Sofia-SIP](http://sofia-sip.sourceforge.net/) (only needed for the SIP plugin)
 * [libopus](http://opus-codec.org/) (only needed for the bridge plugin)
-* [libogg](http://xiph.org/ogg/) (only needed for the voicemail plugin)
+* [libogg](http://xiph.org/ogg/) (needed for the voicemail plugin and/or post-processor)
 * [libcurl](https://curl.haxx.se/libcurl/) (only needed if you are
 interested in RTSP support in the Streaming plugin or in the sample
 Event Handler plugin)
+* [Lua](https://www.lua.org/download.html) (only needed for the Lua plugin)
 
 Additionally, you'll need the following libraries and tools:
 
@@ -58,8 +59,8 @@ instance, is very simple:
 
     yum install libmicrohttpd-devel jansson-devel libnice-devel \
        openssl-devel libsrtp-devel sofia-sip-devel glib-devel \
-       opus-devel libogg-devel libcurl-devel pkgconfig gengetopt \
-       libtool autoconf automake
+       opus-devel libogg-devel libcurl-devel lua-devel \
+       pkgconfig gengetopt libtool autoconf automake
 
 Notice that you may have to `yum install epel-release` as well if you're
 attempting an installation on a CentOS machine instead.
@@ -68,8 +69,8 @@ On Ubuntu or Debian, it would require something like this:
 
 	aptitude install libmicrohttpd-dev libjansson-dev libnice-dev \
 		libssl-dev libsrtp-dev libsofia-sip-ua-dev libglib2.0-dev \
-		libopus-dev libogg-dev libcurl4-openssl-dev pkg-config gengetopt \
-		libtool automake
+		libopus-dev libogg-dev libcurl4-openssl-dev liblua5.3-dev \
+		pkg-config gengetopt libtool automake
 
 * *Note:* please notice that libopus may not be available out of the box
 on Ubuntu or Debian, unless you're using a recent version (e.g., Ubuntu
@@ -309,7 +310,7 @@ or on the command line:
 
 	<installdir>/bin/janus --help
 
-	janus 0.3.1
+	janus 0.4.0
 
 	Usage: janus [OPTIONS]...
 
@@ -327,6 +328,7 @@ or on the command line:
 	-F, --configs-folder=path     Configuration files folder (default=./conf)
 	-c, --cert-pem=filename       DTLS certificate
 	-k, --cert-key=filename       DTLS certificate key
+	-K, --cert-pwd=text           DTLS certificate key passphrase (if needed)
 	-S, --stun-server=filename    STUN server(:port) to use, if needed (e.g.,
 								  gateway behind NAT, default=none)
 	-1, --nat-1-1=ip              Public IP to put in all host candidates,
@@ -364,6 +366,9 @@ or on the command line:
 	-n, --server-name=name        Public name of this Janus instance
                                   (default=MyJanusInstance)
 	-s, --session-timeout=number  Session timeout value, in seconds (default=60)
+	-m, --reclaim-session-timeout=number
+                                  Reclaim session timeout value, in seconds
+                                  (default=0)
 	-d, --debug-level=1-7         Debug/logging level (0=disable debugging,
                                   7=maximum debug level; default=4)
 	-D, --debug-timestamps        Enable debug/logging timestamps  (default=off)

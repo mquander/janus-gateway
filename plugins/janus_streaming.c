@@ -104,9 +104,10 @@ srtpsuite = 32
 srtpcrypto = WbTBosdVUZqEb6Htqhn+m3z7wUh4RJVR8nE15GbN
 
 The following options are only valid for the 'rstp' type:
-url = RTSP stream URL (only if type=rtsp)
-rtsp_user = RTSP authorization username (only if type=rtsp)
-rtsp_pwd = RTSP authorization password (only if type=rtsp)
+url = RTSP stream URL
+rtsp_user = RTSP authorization username, if needed
+rtsp_pwd = RTSP authorization password, if needed
+rtsp_failcheck = whether an error should be returned if connecting to the RTSP server fails (default=yes)
 rtspiface = network interface IP address or device name to listen on when receiving RTSP streams
 \endverbatim
  *
@@ -117,8 +118,8 @@ rtspiface = network interface IP address or device name to listen on when receiv
  * (invalid JSON, invalid request) which will always result in a
  * synchronous error response even for asynchronous requests.
  *
- * \c list , \c create , \c destroy , \c recording , \c enable and
- * \c disable are synchronous requests, which means you'll
+ * \c list , \c info , \c create , \c destroy , \c recording , \c edit ,
+ * \c enable and \c disable are synchronous requests, which means you'll
  * get a response directly within the context of the transaction. \c list
  * lists all the available streams; \c create allows you to create a new
  * mountpoint dynamically, as an alternative to using the configuration
@@ -127,8 +128,9 @@ rtspiface = network interface IP address or device name to listen on when receiv
  * recorded while it's broadcasted; \c enable and \c disable respectively
  * enable and disable a mountpoint, that is decide whether or not a
  * mountpoint should be available to users without destroying it.
+ * \c edit allows you to dynamically edit some mountpoint properties (e.g., the PIN);
  *
- * The \c watch , \c start , \c pause , \c switch and \c stop requests
+ * The \c watch , \c start , \c configure , \c pause , \c switch and \c stop requests
  * instead are all asynchronous, which means you'll get a notification
  * about their success or failure in an event. \c watch asks the plugin
  * to prepare the playout of one of the available streams; \c start
@@ -146,11 +148,491 @@ rtspiface = network interface IP address or device name to listen on when receiv
  * \c admin_key value in an "admin_key" property will succeed, and will
  * be rejected otherwise.
  *
- * Actual API docs: TBD.
+ * \subsection streamingsync Synchronous requests
+ *
+ * To list the available Streaming mountpoints (both those created via
+ * configuration file and those created via API), you can use the \c list
+ * request:
+ *
+\verbatim
+{
+	"request" : "list"
+}
+\endverbatim
+ *
+ * If successful, it will return an array with a list of all the mountpoints.
+ * Notice that only the public mountpoints will be returned: those with
+ * an \c is_private set to yes/true will be skipped. The response will
+ * be formatted like this:
+ *
+\verbatim
+{
+	"streaming" : "list",
+	"list" : [
+		{
+			"id" : <unique ID of mountpoint #1>,
+			"description" : "<description of mountpoint #1>",
+			"type" : "<type of mountpoint #1, in line with the types introduced above>",
+			"audio_age_ms" : <how much time passed since we last received audio; optional, available for RTP mountpoints only>,
+			"video_age_ms" : <how much time passed since we last received video; optional, available for RTP mountpoints only>
+		},
+		{
+			"id" : <unique ID of mountpoint #2>,
+			"description" : "<description of mountpoint #2>",
+			"type" : "<type of mountpoint #2, in line with the types introduced above>",
+			"audio_age_ms" : <how much time passed since we last received audio; optional, available for RTP mountpoints only>,
+			"video_age_ms" : <how much time passed since we last received video; optional, available for RTP mountpoints only>
+		},
+		...
+	]
+}
+\endverbatim
+ *
+ * As you can see, the \c list request only returns very generic info on
+ * each mounpoint. In case you're interested in learning more details about
+ * a specific mountpoint, you can use the \c info request instead, which
+ * returns more information, or all of it if the mountpoint secret is
+ * provided in the request. An \c info request must be formatted like this:
+ *
+\verbatim
+{
+	"request" : "info"
+	"id" : <unique ID of mountpoint to query>,
+	"secret" : <mountpoint secret; optional, can be used to return more info>"
+}
+\endverbatim
+ *
+ * If successful, this will have the plugin return an object containing
+ * more info on the mountpoint:
+ *
+\verbatim
+{
+	"streaming" : "info",
+	"info" : {
+		"id" : <unique ID of mountpoint>,
+		"name" : "<unique name of mountpoint>",
+		"description" : "<description of mountpoint>",
+		"secret" : "<secret of mountpoint; only available if a valid secret was provided>",
+		"pin" : "<PIN to access mountpoint; only available if a valid secret was provided>",
+		"is_private" : <true|false, depending on whether the mountpoint is listable; only available if a valid secret was provided>,
+		"enabled" : <true|false, depending on whether the mountpoint is currently enabled or not>,
+		"audio" : <true, only present if the mountpoint contains audio>,
+		"audiopt" : <audio payload type, only present if configured and the mountpoint contains audio>,
+		"audiortpmap" : "<audio SDP rtpmap value, only present if configured and the mountpoint contains audio>",
+		"audiofmtp" : "<audio SDP fmtp value, only present if configured and the mountpoint contains audio>",
+		"video" : <true, only present if the mountpoint contains video>,
+		"videopt" : <video payload type, only present if configured and the mountpoint contains video>,
+		"videortpmap" : "<video SDP rtpmap value, only present if configured and the mountpoint contains video>",
+		"videofmtp" : "<video SDP fmtp value, only present if configured and the mountpoint contains video>",
+		...
+	}
+}
+\endverbatim
+ *
+ * Considering the different mountpoint types that you can create in this
+ * plugin, the nature of the rest of the returned info obviously depends
+ * on which mountpoint you're querying. This is especially true for RTP
+ * and RTSP mountpoints. Notice that info like the ports an RTP mountpoint
+ * is listening on will only be returned if you provide the correct secret,
+ * as otherwise they're treated like sensitive information and are not
+ * returned to generic \c info calls.
+ *
+ * We've seen how you can create a new mountpoint via configuration file,
+ * but you can create one via API as well, using the \c create request.
+ * Most importantly, you can also choose whether or not a \c create
+ * request should result in the mountpoint being saved to configuration
+ * file so that it's still available after a server restart. The common
+ * syntax for all \c create requests is the following:
+ *
+\verbatim
+{
+	"request" : "create",
+	"admin_key" : "<plugin administrator key; mandatory if configured>",
+	"type" : "<type of the mountpoint to create; mandatory>",
+	"id" : <unique ID to assign the mountpoint; optional, will be chosen by the server if missing>,
+	"name" : "<unique name for the mountpoint; optional, will be chosen by the server if missing>",
+	"description" : "<description of mountpoint; optional>",
+	"secret" : "<secret to query/edit the mountpoint later; optional>",
+	"pin" : "<PIN required for viewers to access mountpoint; optional>",
+	"is_private" : <true|false, whether the mountpoint should be listable; true by default>,
+	"audio" : <true|false, whether the mountpoint will have audio; false by default>,
+	"video" : <true|false, whether the mountpoint will have video; false by default>,
+	"data" : <true|false, whether the mountpoint will have datachannels; false by default>,
+	"permanent" : <true|false, whether the mountpoint should be saved to configuration file or not; false by default>,
+	...
+}
+\endverbatim
+ *
+ * Of course, different mountpoint types will have different properties
+ * you can specify in a \c create. Please refer to the documentation on
+ * configuration files to see the fields you can pass. The only important
+ * difference to highlight is that, unlike in configuration files, you will
+ * NOT have to escape semicolons with a trailing slash, in those properties
+ * where a semicolon might be needed (e.g., \c audiofmtp or \c videofmtp ).
+ *
+ * A successful \c create will result in a \c created response:
+ *
+\verbatim
+{
+	"streaming" : "created",
+	"create" : "<unique name of the just created mountpoint>",
+	"permanent" : <true|false, depending on whether the mountpoint was saved to configuration file or not>,
+	"stream": {
+		"id" : <unique ID of the just created mountpoint>,
+		"type" : "<type of the just created mountpoint>",
+		"description" : "<description of the just created mountpoint>",
+		"is_private" : <true|false, depending on whether the new mountpoint is listable>,
+		...
+	}
+}
+\endverbatim
+ *
+ * Notice that additional information, namely the ports the mountpoint
+ * bound to, will only be added for new RTP mountpoints, otherwise this
+ * is all that a \c created request will contain. If you want to double
+ * check everything in your \c create request went as expected, you may
+ * want to issue a followup \c info request to compare the results.
+ *
+ * Once you created a mountpoint, you can modify some (not all) of its
+ * properties via an \c edit request. Namely, you can only modify generic
+ * properties like the mountoint description, the secret, the PIN and
+ * whether or not the mountpoint should be listable. All other properties
+ * are considered to be immutable. Again, you can choose whether the changes
+ * should be permanent, e.g., saved to configuration file, or not. Notice
+ * that an \c edit request requires the right secret to be provided, if
+ * the mountpoint has one, or will return an error instead. The \c edit
+ * request must be formatted like this:
+ *
+\verbatim
+{
+	"request" : "edit",
+	"id" : <unique ID of the mountpoint to edit; mandatory>,
+	"secret" : "<secret to edit the mountpoint; mandatory if configured>",
+	"new_description" : "<new description for the mountpoint; optional>",
+	"new_secret" : "<new secret for the mountpoint; optional>",
+	"new_pin" : "<new PIN for the mountpoint; optional>",
+	"new_is_private" : <true|false, depending on whether the mountpoint should be now listable; optional>,
+	"permanent" : <true|false, whether the mountpoint should be saved to configuration file or not; false by default>
+}
+\endverbatim
+ *
+ * A successful \c edit will result in an \c edited response:
+ *
+\verbatim
+{
+	"streaming" : "edited",
+	"id" : <unique ID of the just edited mountpoint>,
+	"permanent" : <true|false, depending on whether the changes were saved to configuration file or not>
+}
+\endverbatim
+ *
+ * Just as you can create and edit mountpoints, you can of course also destroy
+ * them. Again, this applies to all mountpoints, whether created statically
+ * via configuration file or dynamically via API, and the mountpoint destruction
+ * can be made permanent in the configuration file as well. A \c destroy
+ * request must be formatted as follows:
+ *
+\verbatim
+{
+	"request" : "destroy",
+	"id" : <unique ID of the mountpoint to destroy; mandatory>,
+	"secret" : "<secret to destroy the mountpoint; mandatory if configured>",
+	"permanent" : <true|false, whether the mountpoint should be removed from the configuration file or not; false by default>
+}
+\endverbatim
+ *
+ * If successful, the result will be confirmed in a \c destroyed event:
+ *
+\verbatim
+{
+	"streaming" : "destroyed",
+	"id" : <unique ID of the just destroyed mountpoint>
+}
+\endverbatim
+ *
+ * Notice that destroying a mountpoint while viewers are still subscribed
+ * to it will result in all viewers being kicked.
+ *
+ * You can also dynamically enable and disable mountpoints via API. A
+ * disabled mountpoint is a mountpoint that exists, and still works as
+ * expected, but is not accessible to viewers until it's enabled again.
+ * This is a useful property, especially in case of mountpoints that
+ * need to be prepared in advance but must not be accessible until a
+ * specific moment, and a much better alternative to just create the
+ * mountpoint at the very last minute and destroy it otherwise. The
+ * syntax for both the \c enable and \c disable requests is the same,
+ * and looks like the following:
+ *
+\verbatim
+{
+	"request" : "enable|disable",
+	"id" : <unique ID of the mountpoint to enable/disable; mandatory>,
+	"secret" : "<secret to enable/disable the mountpoint; mandatory if configured>"
+}
+\endverbatim
+ *
+ * In both cases, a generic \c ok is returned if successful:
+ *
+\verbatim
+{
+	"streaming" : "ok"
+}
+\endverbatim
+ *
+ * Finally, you can record a mountpoint to the internal Janus .mjr format
+ * using the \c recording request. The same request can also be used to
+ * stop recording. Although the same request is used in both cases, though,
+ * the syntax for the two use cases differs a bit, namely in terms of the
+ * type of some properties.
+ *
+ * To start recording a new mountpoint, the request should be formatted
+ * like this:
+ *
+\verbatim
+{
+	"request" : "recording",
+	"action" : "start",
+	"id" : <unique ID of the mountpoint to manipulate; mandatory>,
+	"audio" : "<enable audio recording, and use this base path/filename; optional>",
+	"video" : "<enable video recording, and use this base path/filename; optional>",
+	"data" : "<enable data recording, and use this base path/filename; optional>",
+	"audio" : <true|false; whether or not audio should be recorded>,
+	"video" : <true|false; whether or not video should be recorded>,
+	"data" : <true|false; whether or not datachannel messages should be recorded>
+}
+\endverbatim
+ *
+ * To stop a recording, instead, this is the request syntax:
+ *
+\verbatim
+{
+	"request" : "recording",
+	"action" : "stop",
+	"id" : <unique ID of the mountpoint to manipulate; mandatory>,
+	"audio" : <true|false; whether or not audio recording should be stopped>,
+	"video" : <true|false; whether or not video recording should be stopped>,
+	"data" : <true|false; whether or not datachannel recording should be stopped>
+}
+\endverbatim
+ *
+ * As you can notice, when you want to start a recording the \c audio ,
+ * \c video and \c data properties are strings, and specify the base path
+ * to use for the recording filename; when stopping a recording, instead,
+ * they're interpreted as boolean properties. Notice that, as with all
+ * APIs that wrap .mjr recordings, the filename you specify here is not
+ * the actual filename: an \c .mjr extension is always going to be added
+ * by the Janus core, so you should take this into account when tracking
+ * the related recording files.
+ *
+ * Whether you started or stopped a recording, a successful request will
+ * always result in a simple \c ok response:
+ *
+\verbatim
+{
+	"streaming" : "ok"
+}
+\endverbatim
+ *
+ * \subsection streamingasync Asynchronous requests
+ *
+ * All the requests we've gone through so far are synchronous. This means
+ * that they return a response right away. That said, many of the requests
+ * this plugin supports are asynchronous instead, which means Janus will
+ * send an ack when they're received, and a response will only follow
+ * later on. This is especially true for requests dealing with the
+ * management and setup of mountpoint viewers, e.g., for the purpose of
+ * negotiating a WebRTC PeerConnection to receive media from a mountpoint.
+ *
+ * To subscribe to a specific mountpoint, an interested viewer can make
+ * use of the \c watch request. As suggested by the request name, this
+ * instructs the plugin to setup a new PeerConnection to allow the new
+ * viewer to watch the specified mountpoint. The \c watch request must
+ * be formatted like this:
+ *
+\verbatim
+{
+	"request" : "watch",
+	"id" : <unique ID of the mountpoint to subscribe to; mandatory>,
+	"pin" : "<PIN required to access the mountpoint; mandatory if configured>",
+	"offer_audio" : <true|false; whether or not audio should be negotiated; true by default if the mountpoint has audio>,
+	"offer_video" : <true|false; whether or not video should be negotiated; true by default if the mountpoint has video>,
+	"offer_data" : <true|false; whether or not datachannels should be negotiated; true by default if the mountpoint has datachannels>
+}
+\endverbatim
+ *
+ * As you can see, it's just a matter of specifying the ID of the mountpoint to
+ * subscribe to and, if needed, the PIN to access the mountpoint in case
+ * it's protected. The \c offer_audio , \c offer_video and \c offer_data are
+ * also particularly interesting, though, as they allow you to only subscribe
+ * to a subset of the mountpoint media. By default, in fact, a \c watch
+ * request will result in the plugin preparing a new SDP offer trying to
+ * negotiate all the media streams available in the mountpoint; in case
+ * the viewer knows they don't support one of the mountpoint codecs, though
+ * (e.g., the video in the mountpoint is VP8, but they only support H.264),
+ * or are not interested in getting all the media (e.g., they're ok with
+ * just audio and not video, or don't have enough bandwidth for both),
+ * they can use those properties to shape the SDP offer to their needs.
+ *
+ * As anticipated, if successful this request will generate a new JSEP SDP
+ * offer, which will be attached to a \c preparing status event:
+ *
+\verbatim
+{
+	"status" : "preparing"
+}
+\endverbatim
+ *
+ * At this stage, to complete the setup of a subscription the viewer is
+ * supposed to send a JSEP SDP answer back to the plugin. This is done
+ * by means of a \c start request, which in this case MUST be associated
+ * with a JSEP SDP answer but otherwise requires no arguments:
+ *
+\verbatim
+{
+	"request" : "start"
+}
+\endverbatim
+ *
+ * If successful this request returns a \c starting status event:
+ *
+\verbatim
+{
+	"status" : "starting"
+}
+\endverbatim
+ *
+ * Once this is done, all that's needed is waiting for the WebRTC PeerConnection
+ * establishment to succeed. As soon as that happens, the Streaming plugin
+ * can start relaying media from the mountpoint the viewer subscribed to
+ * to the viewer themselves.
+ *
+ * Notice that the same exact steps we just went through (\c watch request,
+ * followed by JSEP offer by the plugin, followed by \c start request with
+ * JSEP answer by the viewer) is what you also use when renegotiations are
+ * needed, e.g., for the purpose of ICE restarts.
+ *
+ * As a viewer, you can temporarily pause and resume the whole media delivery
+ * with a \c pause and, again, \c start request (in this case without any JSEP
+ * SDP answer attached). Neither expect other arguments, as the context
+ * is implicitly derived from the handle they're sent on:
+ *
+\verbatim
+{
+	"request" : "pause"
+}
+\endverbatim
+ *
+\verbatim
+{
+	"request" : "start"
+}
+\endverbatim
+ *
+ * Unsurprisingly, they just result in, respectively, \c pausing and
+ * \c starting events:
+ *
+\verbatim
+{
+	"status" : "pausing"
+}
+\endverbatim
+ *
+\verbatim
+{
+	"status" : "starting"
+}
+\endverbatim
+ *
+ * For more drill-down manipulations of a subscription, a \c configure
+ * request can be used instead. This request allows viewers to dynamically
+ * change some properties associated to their media subscription, e.g.,
+ * in terms of what should and should not be sent at a specific time. A
+ * \c configure request must be formatted as follows:
+ *
+\verbatim
+{
+	"request" : "configure",
+	"audio" : <true|false, depending on whether audio should be relayed or not; optional>,
+	"video" : <true|false, depending on whether video should be relayed or not; optional>,
+	"data" : <true|false, depending on whether datachannel messages should be relayed or not; optional>,
+	"substream" : <substream to receive (0-2), in case simulcasting is enabled; optional>,
+	"temporal" : <temporal layers to receive (0-2), in case simulcasting is enabled; optional>
+}
+\endverbatim
+ *
+ * As you can see, the \c audio , \c video and \c data properties can be
+ * used as a media-level pause/resume functionality, whereas \c pause
+ * and \c start simply pause and resume all streams at the same time.
+ * The \c substream and \c temporal properties, instead, only make sense
+ * when the mountpoint is configured with video simulcasting support, and
+ * as such the viewer is interested in receiving a specific substream
+ * or temporal layer, rather than any other of the available ones.
+ *
+ * Another interesting feature in the Streaming plugin is the so-called
+ * mountpoint "switching". Basically, when subscribed to a specific
+ * mountpoint and receiving media from there, you can at any time "switch"
+ * to a different mountpoint, and as such start receiving media from that
+ * other mountpoint instead. Think of it as changing channel on a TV: you
+ * keep on using the same PeerConnection, the plugin simply changes the
+ * source of the media transparently. Of course, while powerful and effective
+ * this request has some limitations. First of all, it only works with RTP
+ * mountpoints, and not other mountpoint types; besides, the two mountpoints
+ * must have the same media configuration, that is, use the same codecs,
+ * the same payload types, etc. In fact, since the same PeerConnection is
+ * used for this feature, switching to a mountpoint with a different
+ * configuration might result in media incompatible with the PeerConnection
+ * setup being relayed to the viewer, and as such in no audio/video being
+ * played. That said, a \c switch request must be formatted like this:
+ *
+\verbatim
+{
+	"request" : "switch",
+	"id" : <unique ID of the new mountpoint to switch to; mandatory>
+}
+\endverbatim
+ *
+ * If successful, you'll be unsubscribed from the previous mountpoint,
+ * and subscribed to the new mountpoint instead. The event to confirm
+ * the switch was successful will look like this:
+ *
+\verbatim
+{
+	"switched" : "ok",
+	"id" : <unique ID of the new mountpoint>
+}
+\endverbatim
+ *
+ * Finally, to stop the subscription to the mountpoint and tear down the
+ * related PeerConnection, you can use the \c stop request. Since context
+ * is implicit, no other argument is required:
+ *
+\verbatim
+{
+	"request" : "stop"
+}
+\endverbatim
+ *
+ * If successful, the plugin will attempt to tear down the PeerConnection,
+ * and will send back a \c stopping status event:
+ *
+\verbatim
+{
+	"status" : "stopping"
+}
+\endverbatim
+ *
+ * Once a PeerConnection has been torn down and the subscription closed,
+ * as a viewer you're free to subscribe to a different mountpoint instead.
+ * In fact, while you can't watch more than one mountpoint at the same
+ * time on the same handle, there's no limit on how many mountpoints
+ * you can watch in sequence, again on the same handle. If you're interested
+ * in subscribing to multiple mountpoints at the same time, instead, you'll
+ * have to create multiple handles for the purpose.
  *
  * \ingroup plugins
  * \ref plugins
  */
+
 
 #include "plugin.h"
 
@@ -252,6 +734,14 @@ static struct janus_json_parameter watch_parameters[] = {
 static struct janus_json_parameter adminkey_parameters[] = {
 	{"admin_key", JSON_STRING, JANUS_JSON_PARAM_REQUIRED}
 };
+static struct janus_json_parameter edit_parameters[] = {
+	{"id", JSON_INTEGER, JANUS_JSON_PARAM_REQUIRED | JANUS_JSON_PARAM_POSITIVE},
+	{"new_description", JSON_STRING, 0},
+	{"new_secret", JSON_STRING, 0},
+	{"new_pin", JSON_STRING, 0},
+	{"new_is_private", JANUS_JSON_BOOL, 0},
+	{"permanent", JANUS_JSON_BOOL, 0}
+};
 static struct janus_json_parameter create_parameters[] = {
 	{"type", JSON_STRING, JANUS_JSON_PARAM_REQUIRED},
 	{"secret", JSON_STRING, 0},
@@ -303,7 +793,8 @@ static struct janus_json_parameter rtsp_parameters[] = {
 	{"video", JANUS_JSON_BOOL, 0},
 	{"videortpmap", JSON_STRING, 0},
 	{"videofmtp", JSON_STRING, 0},
-	{"rtspiface", JSON_STRING, 0}
+	{"rtspiface", JSON_STRING, 0},
+	{"rtsp_failcheck", JANUS_JSON_BOOL, 0}
 };
 #endif
 static struct janus_json_parameter rtp_audio_parameters[] = {
@@ -524,7 +1015,8 @@ janus_streaming_mountpoint *janus_streaming_create_rtsp_source(
 		char *url, char *username, char *password,
 		gboolean doaudio, char *artpmap, char *afmtp,
 		gboolean dovideo, char *vrtpmap, char *vfmtp,
-		const janus_network_address *iface);
+		const janus_network_address *iface,
+		gboolean error_on_failure);
 
 
 typedef struct janus_streaming_message {
@@ -716,7 +1208,7 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 		if(!notify_events && callback->events_is_enabled()) {
 			JANUS_LOG(LOG_WARN, "Notification of events to handlers disabled for %s\n", JANUS_STREAMING_NAME);
 		}
-		/* Iterate on all rooms */
+		/* Iterate on all mountpoints */
 		GList *cl = janus_config_get_categories(config);
 		while(cl != NULL) {
 			janus_config_category *cat = (janus_config_category *)cl->data;
@@ -1063,6 +1555,7 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 				janus_config_item *vrtpmap = janus_config_get_item(cat, "videortpmap");
 				janus_config_item *vfmtp = janus_config_get_item(cat, "videofmtp");
 				janus_config_item *iface = janus_config_get_item(cat, "rtspiface");
+				janus_config_item *failerr = janus_config_get_item(cat, "rtsp_failcheck");
 				janus_network_address iface_value;
 				if(file == NULL || file->value == NULL) {
 					JANUS_LOG(LOG_ERR, "Can't add 'rtsp' stream '%s', missing mandatory information...\n", cat->name);
@@ -1072,6 +1565,9 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 				gboolean is_private = priv && priv->value && janus_is_true(priv->value);
 				gboolean doaudio = audio && audio->value && janus_is_true(audio->value);
 				gboolean dovideo = video && video->value && janus_is_true(video->value);
+				gboolean error_on_failure = TRUE;
+				if(failerr && failerr->value)
+					error_on_failure = janus_is_true(failerr->value);
 
 				if((doaudio || dovideo) && iface && iface->value) {
 					if(!ifas) {
@@ -1113,7 +1609,8 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 						dovideo,
 						vrtpmap ? (char *)vrtpmap->value : NULL,
 						vfmtp ? (char *)vfmtp->value : NULL,
-						iface && iface->value ? &iface_value : NULL)) == NULL) {
+						iface && iface->value ? &iface_value : NULL,
+						error_on_failure)) == NULL) {
 					JANUS_LOG(LOG_ERR, "Error creating 'rtsp' stream '%s'...\n", cat->name);
 					cl = cl->next;
 					continue;
@@ -1433,6 +1930,7 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 			json_object_set_new(ml, "pin", json_string(mp->pin));
 		if(admin && mp->is_private)
 			json_object_set_new(ml, "is_private", json_true());
+		json_object_set_new(ml, "enabled", mp->enabled ? json_true() : json_false());
 		if(mp->audio) {
 			json_object_set_new(ml, "audio", json_true());
 			if(mp->codecs.audio_pt != -1)
@@ -1905,8 +2403,10 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 			json_t *username = json_object_get(root, "rtsp_user");
 			json_t *password = json_object_get(root, "rtsp_pwd");
 			json_t *iface = json_object_get(root, "rtspiface");
+			json_t *failerr = json_object_get(root, "rtsp_check");
 			gboolean doaudio = audio ? json_is_true(audio) : FALSE;
 			gboolean dovideo = video ? json_is_true(video) : FALSE;
+			gboolean error_on_failure = failerr ? json_is_true(failerr) : TRUE;
 			if(!doaudio && !dovideo) {
 				JANUS_LOG(LOG_ERR, "Can't add 'rtsp' stream, no audio or video have to be streamed...\n");
 				error_code = JANUS_STREAMING_ERROR_CANT_CREATE;
@@ -1934,7 +2434,8 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 					password ? (char *)json_string_value(password) : NULL,
 					doaudio, (char *)json_string_value(audiortpmap), (char *)json_string_value(audiofmtp),
 					dovideo, (char *)json_string_value(videortpmap), (char *)json_string_value(videofmtp),
-					&multicast_iface);
+					&multicast_iface,
+					error_on_failure);
 			if(mp == NULL) {
 				JANUS_LOG(LOG_ERR, "Error creating 'rtsp' stream...\n");
 				error_code = JANUS_STREAMING_ERROR_CANT_CREATE;
@@ -2117,6 +2618,231 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 			gateway->notify_event(&janus_streaming_plugin, session->handle, info);
 		}
 		goto plugin_response;
+	} else if(!strcasecmp(request_text, "edit")) {
+		JANUS_LOG(LOG_VERB, "Attempt to edit an existing streaming mountpoint\n");
+		JANUS_VALIDATE_JSON_OBJECT(root, edit_parameters,
+			error_code, error_cause, TRUE,
+			JANUS_STREAMING_ERROR_MISSING_ELEMENT, JANUS_STREAMING_ERROR_INVALID_ELEMENT);
+		if(error_code != 0)
+			goto plugin_response;
+		/* We only allow for a limited set of properties to be edited */
+		json_t *id = json_object_get(root, "id");
+		json_t *desc = json_object_get(root, "new_description");
+		json_t *secret = json_object_get(root, "new_secret");
+		json_t *pin = json_object_get(root, "new_pin");
+		json_t *is_private = json_object_get(root, "new_is_private");
+		json_t *permanent = json_object_get(root, "permanent");
+		gboolean save = permanent ? json_is_true(permanent) : FALSE;
+		if(save && config == NULL) {
+			JANUS_LOG(LOG_ERR, "No configuration file, can't edit mountpoint permanently\n");
+			error_code = JANUS_STREAMING_ERROR_UNKNOWN_ERROR;
+			g_snprintf(error_cause, 512, "No configuration file, can't edit mountpoint permanently");
+			goto plugin_response;
+		}
+		guint64 id_value = json_integer_value(id);
+		janus_mutex_lock(&mountpoints_mutex);
+		janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints, &id_value);
+		if(mp == NULL) {
+			janus_mutex_unlock(&mountpoints_mutex);
+			JANUS_LOG(LOG_ERR, "No such mountpoint (%"SCNu64")\n", mp->id);
+			error_code = JANUS_STREAMING_ERROR_NO_SUCH_MOUNTPOINT;
+			g_snprintf(error_cause, 512, "No such mountpoint (%"SCNu64")", mp->id);
+			goto plugin_response;
+		}
+		janus_refcount_increase(&mp->ref);
+		janus_mutex_lock(&mp->mutex);
+		/* A secret may be required for this action */
+		JANUS_CHECK_SECRET(mp->secret, root, "secret", error_code, error_cause,
+			JANUS_STREAMING_ERROR_MISSING_ELEMENT, JANUS_STREAMING_ERROR_INVALID_ELEMENT, JANUS_STREAMING_ERROR_UNAUTHORIZED);
+		if(error_code != 0) {
+			janus_mutex_unlock(&mp->mutex);
+			janus_mutex_unlock(&mountpoints_mutex);
+			janus_refcount_decrease(&mp->ref);
+			goto plugin_response;
+		}
+		/* Edit the mountpoint properties that were provided */
+		if(desc != NULL && strlen(json_string_value(desc)) > 0) {
+			char *old_description = mp->description;
+			char *new_description = g_strdup(json_string_value(desc));
+			mp->description = new_description;
+			g_free(old_description);
+		}
+		if(is_private)
+			mp->is_private = json_is_true(is_private);
+		/* A secret may be required for this action */
+		JANUS_CHECK_SECRET(mp->secret, root, "secret", error_code, error_cause,
+			JANUS_STREAMING_ERROR_MISSING_ELEMENT, JANUS_STREAMING_ERROR_INVALID_ELEMENT, JANUS_STREAMING_ERROR_UNAUTHORIZED);
+		if(error_code != 0) {
+			janus_mutex_unlock(&mp->mutex);
+			janus_mutex_unlock(&mountpoints_mutex);
+			janus_refcount_decrease(&mp->ref);
+			goto plugin_response;
+		}
+		if(secret && strlen(json_string_value(secret)) > 0) {
+			char *old_secret = mp->secret;
+			char *new_secret = g_strdup(json_string_value(secret));
+			mp->secret = new_secret;
+			g_free(old_secret);
+		}
+		if(pin && strlen(json_string_value(pin)) > 0) {
+			char *old_pin = mp->pin;
+			char *new_pin = g_strdup(json_string_value(pin));
+			mp->pin = new_pin;
+			g_free(old_pin);
+		}
+		if(save) {
+			JANUS_LOG(LOG_VERB, "Saving editted mountpoint %"SCNu64" permanently in config file\n", mp->id);
+			janus_mutex_lock(&config_mutex);
+			char cat[BUFSIZ], value[BUFSIZ];
+			/* The mountpoint name is the category */
+			g_snprintf(cat, BUFSIZ, "%s", mp->name);
+			/* Remove the old category first */
+			janus_config_remove_category(config, cat);
+			/* Now write the room details again */
+			janus_config_add_category(config, mp->name);
+			/* Now for the common values at top */
+			g_snprintf(value, BUFSIZ, "%"SCNu64, mp->id);
+			janus_config_add_item(config, mp->name, "id", value);
+			janus_config_add_item(config, mp->name, "description", mp->description);
+			if(mp->is_private)
+				janus_config_add_item(config, mp->name, "is_private", "yes");
+			/* Per type values */
+			if(mp->streaming_source == janus_streaming_source_rtp) {
+				janus_streaming_rtp_source *source = mp->source;
+				gboolean rtsp = FALSE;
+#ifdef HAVE_LIBCURL
+				if(source->rtsp)
+						rtsp = TRUE;
+#endif
+				if(rtsp) {
+#ifdef HAVE_LIBCURL
+					janus_config_add_item(config, mp->name, "type", "rtsp");
+					if(source->rtsp_url)
+						janus_config_add_item(config, mp->name, "url", source->rtsp_url);
+					if(source->rtsp_username)
+						janus_config_add_item(config, mp->name, "rtsp_user", source->rtsp_username);
+					if(source->rtsp_password)
+						janus_config_add_item(config, mp->name, "rtsp_pwd", source->rtsp_password);
+#endif
+					if(mp->codecs.audio_pt >= 0) {
+						janus_config_add_item(config, mp->name, "audio", mp->codecs.audio_pt ? "yes" : "no");
+						if(mp->codecs.audio_rtpmap)
+							janus_config_add_item(config, mp->name, "audiortpmap", mp->codecs.audio_rtpmap);
+						if(mp->codecs.audio_fmtp)
+							janus_config_add_item(config, mp->name, "audiofmtp", mp->codecs.audio_fmtp);
+					}
+					if(mp->codecs.video_pt >= 0) {
+						janus_config_add_item(config, mp->name, "video", mp->codecs.video_pt ? "yes" : "no");
+						if(mp->codecs.video_rtpmap)
+							janus_config_add_item(config, mp->name, "videortpmap", mp->codecs.video_rtpmap);
+						if(mp->codecs.video_fmtp)
+							janus_config_add_item(config, mp->name, "videofmtp", mp->codecs.video_fmtp);
+					}
+					json_t *iface = json_object_get(root, "rtspiface");
+					if(iface)
+						janus_config_add_item(config, mp->name, "rtspiface", json_string_value(iface));
+				} else {
+					janus_config_add_item(config, mp->name, "type", "rtp");
+					janus_config_add_item(config, mp->name, "audio", mp->codecs.audio_pt >= 0 ? "yes" : "no");
+					janus_streaming_rtp_source *source = mp->source;
+					if(mp->codecs.audio_pt >= 0) {
+						g_snprintf(value, BUFSIZ, "%d", source->audio_port);
+						janus_config_add_item(config, mp->name, "audioport", value);
+						json_t *audiomcast = json_object_get(root, "audiomcast");
+						if(audiomcast)
+							janus_config_add_item(config, mp->name, "audiomcast", json_string_value(audiomcast));
+						g_snprintf(value, BUFSIZ, "%d", mp->codecs.audio_pt);
+						janus_config_add_item(config, mp->name, "audiopt", value);
+						janus_config_add_item(config, mp->name, "audiortpmap", mp->codecs.audio_rtpmap);
+						if(mp->codecs.audio_fmtp)
+							janus_config_add_item(config, mp->name, "audiofmtp", mp->codecs.audio_fmtp);
+						json_t *aiface = json_object_get(root, "audioiface");
+						if(aiface)
+							janus_config_add_item(config, mp->name, "audioiface", json_string_value(aiface));
+						if(source->askew)
+							janus_config_add_item(config, mp->name, "askew", "yes");
+					}
+					janus_config_add_item(config, mp->name, "video", mp->codecs.video_pt >= 0? "yes" : "no");
+					if(mp->codecs.video_pt >= 0) {
+						g_snprintf(value, BUFSIZ, "%d", source->video_port[0]);
+						janus_config_add_item(config, mp->name, "videoport", value);
+						json_t *videomcast = json_object_get(root, "videomcast");
+						if(videomcast)
+							janus_config_add_item(config, mp->name, "videomcast", json_string_value(videomcast));
+						g_snprintf(value, BUFSIZ, "%d", mp->codecs.video_pt);
+						janus_config_add_item(config, mp->name, "videopt", value);
+						janus_config_add_item(config, mp->name, "videortpmap", mp->codecs.video_rtpmap);
+						if(mp->codecs.video_fmtp)
+							janus_config_add_item(config, mp->name, "videofmtp", mp->codecs.video_fmtp);
+						if(source->keyframe.enabled)
+							janus_config_add_item(config, mp->name, "videobufferkf", "yes");
+						if(source->simulcast) {
+							janus_config_add_item(config, mp->name, "videosimulcast", "yes");
+							if(source->video_port[1]) {
+								g_snprintf(value, BUFSIZ, "%d", source->video_port[1]);
+								janus_config_add_item(config, mp->name, "videoport2", value);
+							}
+							if(source->video_port[2]) {
+								g_snprintf(value, BUFSIZ, "%d", source->video_port[2]);
+								janus_config_add_item(config, mp->name, "videoport3", value);
+							}
+						}
+						json_t *viface = json_object_get(root, "videoiface");
+						if(viface)
+							janus_config_add_item(config, mp->name, "videoiface", json_string_value(viface));
+						if(source->vskew)
+							janus_config_add_item(config, mp->name, "vskew", "yes");
+					}
+					if(source->rtp_collision > 0) {
+						g_snprintf(value, BUFSIZ, "%d", source->rtp_collision);
+						janus_config_add_item(config, mp->name, "collision", value);
+					}
+					janus_config_add_item(config, mp->name, "data", mp->data ? "yes" : "no");
+					if(source->data_port > -1) {
+						g_snprintf(value, BUFSIZ, "%d", source->data_port);
+						janus_config_add_item(config, mp->name, "dataport", value);
+						if(source->buffermsg)
+							janus_config_add_item(config, mp->name, "databuffermsg", "yes");
+						json_t *diface = json_object_get(root, "dataiface");
+						if(diface)
+							janus_config_add_item(config, mp->name, "dataiface", json_string_value(diface));
+					}
+				}
+			} else {
+				janus_config_add_item(config, mp->name, "type", (mp->streaming_type == janus_streaming_type_live) ? "live" : "ondemand");
+				janus_streaming_file_source *source = mp->source;
+				janus_config_add_item(config, mp->name, "filename", source->filename);
+				janus_config_add_item(config, mp->name, "audio", mp->codecs.audio_pt ? "yes" : "no");
+				janus_config_add_item(config, mp->name, "video", mp->codecs.video_pt ? "yes" : "no");
+			}
+			/* Some more common values */
+			if(mp->secret)
+				janus_config_add_item(config, mp->name, "secret", mp->secret);
+			if(mp->pin)
+				janus_config_add_item(config, mp->name, "pin", mp->pin);
+			/* Save modified configuration */
+			if(janus_config_save(config, config_folder, JANUS_STREAMING_PACKAGE) < 0)
+				save = FALSE;	/* This will notify the user the mountpoint is not permanent */
+			janus_mutex_unlock(&config_mutex);
+		}
+		/* Prepare response/notification */
+		response = json_object();
+		json_object_set_new(response, "streaming", json_string("edited"));
+		json_object_set_new(response, "id", json_integer(mp->id));
+		json_object_set_new(response, "permanent", save ? json_true() : json_false());
+		/* Also notify event handlers */
+		if(notify_events && gateway->events_is_enabled()) {
+			json_t *info = json_object();
+			json_object_set_new(info, "event", json_string("edited"));
+			json_object_set_new(info, "id", json_integer(mp->id));
+			gateway->notify_event(&janus_streaming_plugin, session->handle, info);
+		}
+		janus_mutex_unlock(&mp->mutex);
+		janus_mutex_unlock(&mountpoints_mutex);
+		janus_refcount_decrease(&mp->ref);
+		/* Done */
+		JANUS_LOG(LOG_VERB, "Streaming mountpoint edited\n");
+		goto plugin_response;
 	} else if(!strcasecmp(request_text, "destroy")) {
 		/* Get rid of an existing stream (notice this doesn't remove it from the config file, though) */
 		JANUS_VALIDATE_JSON_OBJECT(root, destroy_parameters,
@@ -2190,7 +2916,8 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 			/* The category to remove is the mountpoint name */
 			janus_config_remove_category(config, mp->name);
 			/* Save modified configuration */
-			janus_config_save(config, config_folder, JANUS_STREAMING_PACKAGE);
+			if(janus_config_save(config, config_folder, JANUS_STREAMING_PACKAGE) < 0)
+				save = FALSE;	/* This will notify the user the mountpoint is not permanent */
 			janus_mutex_unlock(&config_mutex);
 		}
 		janus_refcount_decrease(&mp->ref);
@@ -4032,7 +4759,8 @@ janus_streaming_mountpoint *janus_streaming_create_rtsp_source(
 		char *url, char *username, char *password,
 		gboolean doaudio, char *artpmap, char *afmtp,
 		gboolean dovideo, char *vrtpmap, char *vfmtp,
-		const janus_network_address *iface) {
+		const janus_network_address *iface,
+		gboolean error_on_failure) {
 	if(url == NULL) {
 		JANUS_LOG(LOG_ERR, "Can't add 'rtsp' stream, missing url...\n");
 		return NULL;
@@ -4111,19 +4839,22 @@ janus_streaming_mountpoint *janus_streaming_create_rtsp_source(
 	live_rtsp->codecs.audio_fmtp = doaudio ? (afmtp ? g_strdup(afmtp) : NULL) : NULL;
 	live_rtsp->codecs.video_rtpmap = dovideo ? (vrtpmap ? g_strdup(vrtpmap) : NULL) : NULL;
 	live_rtsp->codecs.video_fmtp = dovideo ? (vfmtp ? g_strdup(vfmtp) : NULL) : NULL;
-	/* Now connect to the RTSP server */
-	if(janus_streaming_rtsp_connect_to_server(live_rtsp) < 0) {
-		/* Error connecting, get rid of the mountpoint */
-		janus_mutex_unlock(&mountpoints_mutex);
-		janus_refcount_decrease(&live_rtsp->ref);
-		return NULL;
-	}
-	/* Send an RTSP PLAY, now */
-	if(janus_streaming_rtsp_play(live_rtsp_source) < 0) {
-		/* Error trying to play, get rid of the mountpoint */
-		janus_mutex_unlock(&mountpoints_mutex);
-		janus_refcount_decrease(&live_rtsp->ref);
-		return NULL;
+	/* If we need to return an error on failure, try connecting right now */
+	if(error_on_failure) {
+		/* Now connect to the RTSP server */
+		if(janus_streaming_rtsp_connect_to_server(live_rtsp) < 0) {
+			/* Error connecting, get rid of the mountpoint */
+			janus_mutex_unlock(&mountpoints_mutex);
+			janus_refcount_decrease(&live_rtsp->ref);
+			return NULL;
+		}
+		/* Send an RTSP PLAY, now */
+		if(janus_streaming_rtsp_play(live_rtsp_source) < 0) {
+			/* Error trying to play, get rid of the mountpoint */
+			janus_mutex_unlock(&mountpoints_mutex);
+			janus_refcount_decrease(&live_rtsp->ref);
+			return NULL;
+		}
 	}
 	/* Start the thread that will receive the media packets */
 	GError *error = NULL;
@@ -4149,7 +4880,8 @@ janus_streaming_mountpoint *janus_streaming_create_rtsp_source(
 		char *url, char *username, char *password,
 		gboolean doaudio, char *audiortpmap, char *audiofmtp,
 		gboolean dovideo, char *videortpmap, char *videofmtp,
-		const janus_network_address *iface) {
+		const janus_network_address *iface,
+		gboolean error_on_failure) {
 	JANUS_LOG(LOG_ERR, "RTSP need libcurl\n");
 	return NULL;
 }
@@ -4236,7 +4968,7 @@ static void *janus_streaming_ondemand_thread(void *data) {
 		}
 		passed = d_s*1000000 + d_us;
 		if(passed < 18000) {	/* Let's wait about 18ms */
-			usleep(1000);
+			g_usleep(5000);
 			continue;
 		}
 		/* Update the reference time */
@@ -4356,7 +5088,7 @@ static void *janus_streaming_filesource_thread(void *data) {
 		}
 		passed = d_s*1000000 + d_us;
 		if(passed < 18000) {	/* Let's wait about 18ms */
-			usleep(1000);
+			g_usleep(5000);
 			continue;
 		}
 		/* Update the reference time */
@@ -4647,7 +5379,7 @@ static void *janus_streaming_relay_thread(void *data) {
 					janus_rtp_header *rtp = (janus_rtp_header *)buffer;
 					ssrc = ntohl(rtp->ssrc);
 					if(source->rtp_collision > 0 && a_last_ssrc && ssrc != a_last_ssrc &&
-							(now-source->last_received_audio) < 1000*source->rtp_collision) {
+							(now-source->last_received_audio) < (gint64)1000*source->rtp_collision) {
 						JANUS_LOG(LOG_WARN, "[%s] RTP collision on audio mountpoint, dropping packet (ssrc=%u)\n", name, ssrc);
 						continue;
 					}
@@ -4733,7 +5465,7 @@ static void *janus_streaming_relay_thread(void *data) {
 					janus_rtp_header *rtp = (janus_rtp_header *)buffer;
 					ssrc = ntohl(rtp->ssrc);
 					if(source->rtp_collision > 0 && v_last_ssrc[index] && ssrc != v_last_ssrc[index] &&
-							(now-source->last_received_video) < 1000*source->rtp_collision) {
+							(now-source->last_received_video) < (gint64)1000*source->rtp_collision) {
 						JANUS_LOG(LOG_WARN, "[%s] RTP collision on video mountpoint, dropping packet (ssrc=%u)\n", name, ssrc);
 						continue;
 					}
